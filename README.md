@@ -90,6 +90,18 @@ cd ui ; pnpm install ; pnpm tauri dev
 
 设计上的取舍——为什么不做"已装"检测、为什么 MSI 要先拷到纯 ASCII 路径、为什么不带 VSTOR——记在 [docs/设计取舍.md](docs/设计取舍.md)。
 
+## 用了什么
+
+程序是 [Tauri](https://tauri.app) 打包的：Rust 后端 + WebView2 里的 Vue 界面。具体到版本：
+
+- **外壳** —— Tauri `2.12.4`，管窗口、WebView2 宿主和前后端通信。MIT / Apache-2.0 双许可，任选其一，版权归 Tauri Apps Contributors
+- **界面** —— [Vue](https://vuejs.org) `3.5.43`，掌机外壳和那块屏幕就是它渲染的。MIT
+- **打包** —— [Vite](https://vite.dev) `8.3.4` + `@vitejs/plugin-vue`。只在构建时用，不随程序分发
+- **后端** —— Rust（edition 2021）；`zip`、`windows-sys`、`serde` 等 crate 跟 exe 一起编译进去
+
+这些组件各自按上面的许可分发，不受本仓库的 CC BY-NC-SA 约束；
+它们的版权声明和依赖明细记在 [THIRD-PARTY.md](THIRD-PARTY.md)。
+
 ## 许可证
 
 本仓库代码采用 **[CC BY-NC-SA 4.0](LICENSE)**（署名 - 非商业性使用 - 相同方式共享）：

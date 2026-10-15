@@ -19,9 +19,31 @@
 `assets/logo.svg`、`assets/app-icon.svg` 里的拼图形状取自
 [Lucide](https://lucide.dev) 的 `puzzle` 图标，ISC 许可（宽松，可自由使用）。
 
-## 依赖的第三方库
+## 框架
 
-构建时会拉取这些，它们各自的许可见 `ui/pnpm-lock.yaml`、`ui/src-tauri/Cargo.lock`：
+程序本体是 [Tauri](https://tauri.app) 2 编译出来的，界面用 Vue 写、Vite 打。
+这些代码跟着 exe 一起分发，版权归各自作者，**不受本仓库的 CC BY-NC-SA 约束**。
 
-- Vue 3、Vite（前端）
-- Tauri 2、windows-sys、zip（Rust 后端）
+| 组件 | 版本 | 许可 | 版权 |
+|---|---|---|---|
+| Tauri（窗口 / WebView2 宿主 / IPC） | 2.12.4 | MIT **或** Apache-2.0，任选其一 | Copyright (c) 2017 - Present Tauri Apps Contributors |
+| tao、wry、tauri-runtime、tauri-utils、tauri-codegen 等同一条链上的包 | 2.x | MIT **或** Apache-2.0 | 同上 |
+| Vue（界面运行时） | 3.5.43 | MIT | Copyright (c) 2018-present, Yuxi (Evan) You |
+| @tauri-apps/api | 2.12.3 | MIT **或** Apache-2.0 | Tauri Apps Contributors |
+| Vite、@vitejs/plugin-vue（仅构建期，不进 exe） | 8.3.4 / 6.0.10 | MIT | Vite 与 Vue 团队 |
+
+只用了 MIT 与 Apache-2.0 两种，两份许可原文分别是：
+
+- MIT：<https://opensource.org/license/mit>
+- Apache-2.0：<https://www.apache.org/licenses/LICENSE-2.0>
+
+## Rust crate
+
+`ui/src-tauri/Cargo.lock` 里有 400 多个 crate，实际编译进 exe 的按该文件与
+`ui/src-tauri/Cargo.toml` 为准。除了 Tauri 那条链，主要还有：
+
+- `serde` / `serde_json`（MIT 或 Apache-2.0）
+- `zip`（MIT）
+- `windows-sys`（MIT 或 Apache-2.0，微软官方 crate）
+
+完整依赖树：`cd ui\src-tauri ; cargo tree -e normal`。
