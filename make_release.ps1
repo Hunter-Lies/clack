@@ -43,3 +43,7 @@ $exe = Join-Path $Ui 'src-tauri\target\release\click.exe'
 $dst = Join-Path $OutDir '咔哒-运行库合集.exe'
 Copy-Item -LiteralPath $exe -Destination $dst -Force
 Write-Host ("`n单文件 exe: {0}  ({1:N1} MB)" -f $dst, ((Get-Item $dst).Length / 1MB))
+
+# 4) 自检：这个 exe 自己不能依赖我们要装的运行库，否则在没运行库的机器上起不来
+& (Join-Path $Root 'tools\check_deps.ps1') -Exe $dst
+if ($LASTEXITCODE -ne 0) { throw 'exe 依赖了 VC++ 运行库，别发出去' }

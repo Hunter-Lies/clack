@@ -109,6 +109,21 @@ cargo clean -p click    # 在 ui\src-tauri 下
 判断有没有生效：从 exe 里把图标抠出来看一眼，别看资源管理器（它有图标缓存，
 同一个路径会给你看旧的）。
 
+## 它自己不需要运行库
+
+这点很重要，也是可以自己验的：运行库安装器如果在没运行库的机器上起不来，那就没意义。
+
+```powershell
+.\tools\check_deps.ps1
+```
+
+`click.exe` 的导入表里只有系统 DLL（ntdll / kernel32 / user32 / comctl32 …）和
+**UCRT**（`api-ms-win-crt-*`，Windows 10 起系统自带），没有 `VCRUNTIME140.dll`、
+没有 `MSVCP140.dll`——也就是它装的那些运行库，它自己一个都不用。
+
+唯一的运行时依赖是 **WebView2**（界面由它渲染）：Windows 11 内置，
+Windows 10 随 Edge 自动装上。万一缺失，Tauri 会弹提示让你去装，不会静默失败。
+
 ## 注意
 
 - 未签名，首次运行会被 SmartScreen 拦一下（"更多信息 → 仍要运行"）。
