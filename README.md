@@ -12,7 +12,9 @@
   <img src="https://img.shields.io/badge/%E5%8D%95%E6%96%87%E4%BB%B6-63.6%20MB-e9e1cf?style=flat-square" alt="63.6 MB">
 </p>
 
-![界面](assets/screenshot.png)
+<p align="center">
+  <img src="assets/screenshot.png" width="340" alt="界面">
+</p>
 
 ## 这是什么
 
