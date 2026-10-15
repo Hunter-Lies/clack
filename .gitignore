@@ -1,0 +1,29 @@
+# ---- 打包产物 / 依赖 ----
+ui/node_modules/
+ui/dist/
+ui/src-tauri/target/
+ui/src-tauri/gen/
+
+# ---- 运行库本体（微软的可再发行组件，不进仓库）----
+# 这些都能用 tools\stage_payload.ps1 按 docs\组件来源与校验.md 里的地址重新拉下来
+payload/
+extras/
+ui/src-tauri/payload.zip
+
+# ---- 拆包与下载缓存 ----
+_src/
+tools/download/
+tools/extracted/
+tools/InnoSetup6/
+tools/innoextract.exe
+# 老运行库：微软的二进制，按 tools\legacy\README.md 自备
+tools/legacy/
+
+# ---- 本机配置（里面有我自己的代理地址，别提交）----
+ui/src-tauri/.cargo/config.toml
+
+# ---- 调试时留下的临时文件 ----
+ui/_*
+tools/_*
+tools/*.py
+*.log
