@@ -94,4 +94,8 @@ Tauri 2 + Rust 后端，WebView2 承载 Vue 3 界面，Vite 构建：Tauri `2.12
 
 本仓库代码采用 [CC BY-NC-SA 4.0](LICENSE)：署名、非商业、相同方式共享。
 
+注意这是**源码公开**，不是 OSI 认可的开源许可——非商业性使用这条限制，让它不符合开源定义。
+
 图标取自 [Lucide](https://lucide.dev)（ISC）；程序安装的微软运行库版权归 Microsoft，不在本仓库内。
+
+只想补 DirectX 的话看另一个：[咔哒 DX / Clack DX](https://github.com/Hunter-Lies/clack-dx)。
