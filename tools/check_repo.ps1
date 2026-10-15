@@ -24,6 +24,9 @@ $forbidden = @(
 # 不该被跟踪的文件类型（微软二进制 / 构建产物）
 $badExt = @('.exe', '.msi', '.cab', '.msp', '.dll', '.ocx', '.msm', '.msu', '.zip', '.7z')
 
+# 这个脚本自己就写着上面那些特征串，扫描时跳过它，否则永远报自己
+$selfSkip = @('tools/check_repo.ps1')
+
 Push-Location $Root
 try {
     $files = git ls-files
@@ -34,6 +37,7 @@ try {
     # 1) 本机痕迹
     foreach ($rel in $files) {
         if (-not (Test-Path $rel -PathType Leaf)) { continue }
+        if ($selfSkip -contains ($rel -replace '\\', '/')) { continue }
         foreach ($needle in $forbidden) {
             $hit = Select-String -LiteralPath $rel -Pattern ([regex]::Escape($needle)) -SimpleMatch -ErrorAction SilentlyContinue
             if ($hit) { $problems += "本机痕迹 [$needle] → $rel :$($hit[0].LineNumber)" }

@@ -16,20 +16,19 @@ import {
 const VERSION = "v1.0.0";
 const STEP_MS = 620;
 
-// 浏览器里单独调 UI 用的假清单；跑在 Tauri 里会被 scan() 的结果替掉。
-// 一行一个产品，x86 / x64 在后端展开，不单独占行。
+// 浏览器里单独调 UI（pnpm dev）时用的占位数据。跑在 Tauri 里会被 scan() 的结果替掉。
+// 内容要和 src-tauri/src/lib.rs 里的组件表保持一致，否则截出来的图和真界面不符。
 const DEMO = [
   { id: "vb5", nm: "Visual Basic VM 5.x", ver: "5.02.8244" },
   { id: "vb6", nm: "Visual Basic VM 6.0", ver: "6.00.9802" },
   { id: "crt70", nm: "C Runtime 2002", ver: "7.00.9981" },
   { id: "crt71", nm: "C Runtime 2003", ver: "7.10.3078" },
-  { id: "vc2005", nm: "Visual C++ 2005 SP1", ver: "8.0.61187" },
-  { id: "vc2008", nm: "Visual C++ 2008 SP1", ver: "9.0.30729" },
-  { id: "vc2010", nm: "Visual C++ 2010 SP1", ver: "10.0.40219" },
-  { id: "vc2012", nm: "Visual C++ 2012 U4", ver: "11.0.61135" },
+  { id: "vc2005", nm: "Visual C++ 2005 SP1", ver: "8.0.61001" },
+  { id: "vc2008", nm: "Visual C++ 2008 SP1", ver: "9.0.30729.6161" },
+  { id: "vc2010", nm: "Visual C++ 2010 SP1", ver: "10.0.40219.473" },
+  { id: "vc2012", nm: "Visual C++ 2012 U4", ver: "11.0.61030" },
   { id: "vc2013", nm: "Visual C++ 2013", ver: "12.0.40664" },
   { id: "vc2022", nm: "Visual C++ 2015-2022", ver: "14.51.36247" },
-  { id: "vstor", nm: "VS 2010 Tools for Office", ver: "10.0.60833" },
 ];
 
 const items = ref(DEMO.map((d) => ({ ...d, installed: false, running: false })));
