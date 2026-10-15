@@ -7,7 +7,7 @@
 <p align="center">Windows 单文件运行库合集<br>双击就能用，不用安装，用完删掉就行</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/License-MIT-e9e1cf?style=flat-square" alt="License: MIT">
+  <img src="https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-e9e1cf?style=flat-square" alt="License: CC BY-NC-SA 4.0">
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011%20x64-e9e1cf?style=flat-square" alt="Windows 10 / 11 x64">
   <img src="https://img.shields.io/badge/%E5%8D%95%E6%96%87%E4%BB%B6-63.6%20MB-e9e1cf?style=flat-square" alt="63.6 MB">
 </p>
@@ -92,8 +92,13 @@ cd ui ; pnpm install ; pnpm tauri dev
 
 ## 许可证
 
-本仓库代码 [MIT](LICENSE)。
+本仓库代码采用 **[CC BY-NC-SA 4.0](LICENSE)**（署名 - 非商业性使用 - 相同方式共享）：
 
-图标是 [Lucide](https://lucide.dev) 的 `puzzle`（ISC 许可）。
+- **署名** —— 转载、修改、分发都要保留作者署名和许可声明
+- **非商业** —— 不得用于商业目的
+- **相同方式共享** —— 改了之后再分发，必须用同样的协议
 
-程序安装的 Microsoft Visual C++ / Visual Basic 运行库，版权归 Microsoft Corporation，按其可再发行条款分发；这些二进制不包含在本仓库里。
+图标来自 [Lucide](https://lucide.dev)（ISC 许可）。
+
+程序安装的微软运行库版权归 Microsoft Corporation，按微软的可再发行条款分发，
+**不在本仓库里**，也不由本项目的许可协议覆盖。详见 [THIRD-PARTY.md](THIRD-PARTY.md)。
