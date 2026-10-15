@@ -10,13 +10,21 @@ param(
     [string]$Root = (Split-Path -Parent $PSScriptRoot)
 )
 
-# 老运行库（VB5/VB6、2002/2003 的 CRT/MFC/ATL）微软官网已经下架，
-# 需要使用者自己放一份到 tools\legacy\ —— 见那个目录里的说明。
-# 其余组件都由本脚本从微软官方地址下载后处理。
+# 工作文件统一放在 _work\ 下（不进仓库）：
+#   _work\download      官方安装器下载缓存
+#   _work\legacy        老运行库，微软官网已下架，需要使用者自备（见 tools\legacy\README.md）
+#   _work\extracted     自解压包拆出来的缓存
+#   _work\payload       本脚本的产物，make_release.ps1 会把它打进 exe
 $ErrorActionPreference = 'Stop'
-$Legacy = Join-Path $Root 'tools\legacy'
-$Dl     = Join-Path $Root 'tools\download'
-$Out    = Join-Path $Root 'payload'
+$Work   = Join-Path $Root '_work'
+$Legacy = Join-Path $Work 'legacy'
+$Dl     = Join-Path $Work 'download'
+$Out    = Join-Path $Work 'payload'
+
+New-Item -ItemType Directory -Force $Work | Out-Null
+if (-not (Test-Path $Legacy)) {
+    throw "找不到 $Legacy。老运行库要自备，说明见 tools\legacy\README.md"
+}
 
 $SevenZip = @(
     'C:\Program Files\7-Zip\7z.exe'
@@ -74,7 +82,7 @@ foreach ($it in $items) {
     if ($it.Extract) {
         # 自解压包：先缓存拆包结果，再把需要的文件挑出来。
         # 拆出来的是 MSI + 它的 CAB（或者自带的子安装器），这样能跳过原包的界面。
-        $cache = Join-Path $Root ("tools\extracted\" + [IO.Path]::GetFileNameWithoutExtension($it.Src))
+        $cache = Join-Path $Work ("extracted\" + [IO.Path]::GetFileNameWithoutExtension($it.Src))
         if (-not (Test-Path $cache)) {
             New-Item -ItemType Directory -Force $cache | Out-Null
             & $SevenZip x $it.Src "-o$cache" -y | Out-Null
@@ -84,7 +92,7 @@ foreach ($it in $items) {
             if (-not (Test-Path $from)) { throw "拆包结果里没有 $f（$($it.Src)）" }
             if ($from -like '*.exe') {
                 # 还有一层壳（VSTOR 这类）：再拆一次，把里面的 MSI + CAB 一起拿出来
-                $sub = Join-Path $Root ("tools\extracted\" + [IO.Path]::GetFileNameWithoutExtension($from))
+                $sub = Join-Path $Work ("extracted\" + [IO.Path]::GetFileNameWithoutExtension($from))
                 if (-not (Test-Path $sub)) {
                     New-Item -ItemType Directory -Force $sub | Out-Null
                     & $SevenZip x $from "-o$sub" -y | Out-Null

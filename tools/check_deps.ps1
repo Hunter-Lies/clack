@@ -97,3 +97,4 @@ if ($bad) {
     exit 1
 }
 Write-Host '✅ 没有 VC++ 运行库依赖，没装运行库的机器也能启动' -ForegroundColor Green
+exit 0

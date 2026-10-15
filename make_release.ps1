@@ -5,11 +5,13 @@
 #   .\make_release.ps1 -OutDir D:\某个目录
 [CmdletBinding()]
 param(
-    [string]$Root = (Split-Path -Parent $PSScriptRoot),
-    [string]$OutDir = (Join-Path (Split-Path -Parent $PSScriptRoot) 'out')
+    # 这个脚本就在仓库根目录，所以 Root 是它自己所在目录（tools\ 下的脚本才要往上一层）
+    [string]$Root = $PSScriptRoot,
+    [string]$OutDir
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $OutDir) { $OutDir = Join-Path $Root 'out' }
 
 $SevenZip = @(
     'C:\Program Files\7-Zip\7z.exe'
@@ -18,7 +20,7 @@ $SevenZip = @(
 if (-not $SevenZip) { throw '需要 7-Zip：装一个，或把 7z.exe 放到 PATH 里' }
 
 $Ui = Join-Path $Root 'ui'
-$Payload = Join-Path $Root 'payload'
+$Payload = Join-Path $Root '_work\payload'
 $Zip = Join-Path $Ui 'src-tauri\payload.zip'
 
 if (-not (Test-Path (Join-Path $Payload 'manifest.csv'))) {
