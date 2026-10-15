@@ -459,17 +459,24 @@ svg {
   color: var(--beige-dim);
 }
 
+/* 印刷带右侧的两个跳转键靠右收成一排 */
+.print .links {
+  margin-left: auto;
+  margin-right: -6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* 印刷带右侧的跳转键。做成实底小胶囊：印刷带上的字都是压低的灰，
    这里必须靠"有底色 + 有描边 + 有文字"三个信号才能一眼看出是能点的东西。 */
 .print .jump {
-  margin-left: auto;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
   height: 26px;
   padding: 0 9px;
-  margin-right: -6px;
   border: none;
   border-radius: 7px;
   background: var(--char-3);

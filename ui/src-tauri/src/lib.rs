@@ -212,7 +212,7 @@ fn payload_root(app: &AppHandle) -> Option<PathBuf> {
             return Some(p);
         }
     }
-    for rel in ["../../payload", "../payload", "payload"] {
+    for rel in ["../../_work/payload", "../../payload", "../payload", "payload"] {
         let p = PathBuf::from(rel);
         if p.is_dir() {
             return Some(p);
@@ -488,6 +488,49 @@ fn quit() {
     std::process::exit(0);
 }
 
+/// 用系统默认程序打开链接。界面上的作者 / 仓库两个跳转键走这里。
+/// 不用 WebView 的 window.open：那个在 WebView2 里要额外配权限，还不一定出得去。
+#[tauri::command]
+fn open_url(url: String) -> bool {
+    // 只放行 http(s)。参数来自前端，别让这个命令变成"随便启动什么"的入口
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        log(&format!("拒绝打开非 http(s) 链接：{url}"));
+        return false;
+    }
+    log(&format!("打开链接 {url}"));
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+        let verb = wide("open");
+        let target = wide(&url);
+        let ok = unsafe {
+            let r = ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            );
+            // <= 32 是失败码
+            r as isize > 32
+        };
+        if !ok {
+            log("系统没能打开这个链接");
+        }
+        return ok;
+    }
+
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// 没管理员权限就重新以管理员身份拉起自己，返回 true 表示已经重启过了。
 /// interactive = 用户按下了「安装」：开发模式下启动阶段不弹 UAC（每次重建都弹一次太烦），
 /// 只在这一刻弹；正式版启动时就弹，用户看不到第二次点击。
@@ -518,6 +561,7 @@ pub fn run() {
             install,
             is_elevated,
             request_elevation,
+            open_url,
             quit
         ])
         .run(tauri::generate_context!())
