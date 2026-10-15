@@ -95,6 +95,20 @@ docs/组件来源与校验.md      每个文件的来源、大小、签名、SHA
 cd ui ; pnpm install ; pnpm tauri dev
 ```
 
+**改完图标要记得**：`icons\` 换了之后直接构建，exe 里嵌的图标**不会更新**——
+tauri-build 的 build script 只监视 `tauri.conf.json`，资源脚本不会重跑。两个办法：
+
+```powershell
+# 要么 touch 一下配置，逼 build script 重跑
+(Get-Item ui\src-tauri\tauri.conf.json).LastWriteTime = Get-Date
+
+# 要么连构建产物一起清
+cargo clean -p click    # 在 ui\src-tauri 下
+```
+
+判断有没有生效：从 exe 里把图标抠出来看一眼，别看资源管理器（它有图标缓存，
+同一个路径会给你看旧的）。
+
 ## 注意
 
 - 未签名，首次运行会被 SmartScreen 拦一下（"更多信息 → 仍要运行"）。
