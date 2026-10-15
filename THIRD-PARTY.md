@@ -2,7 +2,7 @@
 
 本仓库自己的代码用 CC BY-NC-SA 4.0（见 [LICENSE](LICENSE)）。下面这些不属于我们，也没法由我们授权。
 
-## 微软运行库（程序安装的对象）
+## 微软运行库
 
 程序会安装的 Microsoft Visual C++ / Visual Basic / C Runtime 等运行库，
 版权归 Microsoft Corporation 所有，按微软自己的可再发行条款分发。
@@ -32,18 +32,14 @@
 | @tauri-apps/api | 2.12.3 | MIT **或** Apache-2.0 | Tauri Apps Contributors |
 | Vite、@vitejs/plugin-vue（仅构建期，不进 exe） | 8.3.4 / 6.0.10 | MIT | Vite 与 Vue 团队 |
 
-只用了 MIT 与 Apache-2.0 两种，两份许可原文分别是：
+许可原文：[MIT](https://opensource.org/license/mit) · [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0)
 
-- MIT：<https://opensource.org/license/mit>
-- Apache-2.0：<https://www.apache.org/licenses/LICENSE-2.0>
+## Rust
 
-## Rust crate
-
-`ui/src-tauri/Cargo.lock` 里有 400 多个 crate，实际编译进 exe 的按该文件与
-`ui/src-tauri/Cargo.toml` 为准。除了 Tauri 那条链，主要还有：
+`ui/src-tauri/Cargo.lock` 里有 400 多个 crate，编译进 exe 的主要还有：
 
 - `serde` / `serde_json`（MIT 或 Apache-2.0）
 - `zip`（MIT）
 - `windows-sys`（MIT 或 Apache-2.0，微软官方 crate）
 
-完整依赖树：`cd ui\src-tauri ; cargo tree -e normal`。
+完整依赖树：在 `ui\src-tauri` 下跑 `cargo tree -e normal`。

@@ -26,11 +26,11 @@ x86 和 x64 一起装。老游戏大多是 32 位，只装 64 位照样缺库。
 </tr>
 </table>
 
-## 用法
+## 安装
 
 从 [Releases](https://github.com/Hunter-Lies/clack/releases) 下 `Clack-1.0.0-x64.exe`，双击，过 UAC，点按钮。
 
-## 系统改动
+## 改动
 
 | 位置 | 内容 |
 |---|---|
@@ -40,7 +40,7 @@ x86 和 x64 一起装。老游戏大多是 32 位，只装 64 位照样缺库。
 
 不联网、不驻留、不自启、不装服务。想清干净：删 exe，删 `C:\ProgramData\Click\`，装上的运行库去「应用和功能」卸。
 
-## 常见问题
+## 问题
 
 **提示"已保护你的电脑"** —— 没买代码签名证书，点「更多信息」→「仍要运行」。
 
@@ -73,7 +73,7 @@ cd ui ; pnpm install ; pnpm tauri dev     # 开发调试
 
 仓库里只有源码，没有可执行文件。
 
-## 技术栈
+## 框架
 
 Tauri 2 + Rust 后端，WebView2 里的 Vue 3 界面，Vite 打包：Tauri `2.12.4`（MIT / Apache-2.0）、Vue `3.5.43`（MIT）、Vite `8.3.4`（MIT，仅构建期）。
 
