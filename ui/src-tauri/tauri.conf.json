@@ -29,6 +29,10 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "publisher": "HUNTER",
+    "copyright": "© 2026 HunterLies",
+    "shortDescription": "咔哒 Clack · 运行库合集",
+    "longDescription": "单文件运行库合集：一键补齐 Microsoft Visual C++ / Visual Basic / C Runtime 等运行库。",
     "resources": { "../../payload": "payload" },
     "icon": [
       "icons/32x32.png",

@@ -3,6 +3,9 @@ ui/node_modules/
 ui/dist/
 ui/src-tauri/target/
 ui/src-tauri/gen/
+# tauri icon 会顺手生成移动端图标，这个项目只发 Windows，不进仓库
+ui/src-tauri/icons/android/
+ui/src-tauri/icons/ios/
 
 # ---- 运行库本体（微软的可再发行组件，不进仓库）----
 # 这些都能用 tools\stage_payload.ps1 按 docs\组件来源与校验.md 里的地址重新拉下来
