@@ -22,6 +22,8 @@
 
 x86 和 x64 一起装。老游戏大多是 32 位，只装 64 位照样缺库。
 
+全程离线运行，不驻留、不自启、不装服务。
+
 </td>
 </tr>
 </table>
@@ -38,7 +40,7 @@ x86 和 x64 一起装。老游戏大多是 32 位，只装 64 位照样缺库。
 | `%TEMP%\Click.log`、`C:\ProgramData\Click\<组件>\install.log` | 日志 |
 | System32 / SysWOW64 / WinSxS、「应用和功能」里的那些项 | 微软安装器写的 |
 
-不联网、不驻留、不自启、不装服务。想清干净：删 exe，删 `C:\ProgramData\Click\`，装上的运行库去「应用和功能」卸。
+想清干净：删 exe，删 `C:\ProgramData\Click\`，装上的运行库去「应用和功能」卸。
 
 ## 问题
 
