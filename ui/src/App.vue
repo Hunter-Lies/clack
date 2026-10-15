@@ -13,7 +13,7 @@ import {
   scan,
 } from "./lib/api";
 
-const VERSION = "v1.0.0.0";
+const VERSION = "v1.0.0";
 const STEP_MS = 620;
 
 // 浏览器里单独调 UI 用的假清单；跑在 Tauri 里会被 scan() 的结果替掉。

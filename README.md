@@ -64,17 +64,27 @@ x86 那份的 MSI 里写死了 `CA_BlockOnAMD64` 直接拒绝在 64 位安装。
 ## 目录结构
 
 ```
-ui/                        Vue 3 + Vite 前端，Tauri 2 外壳
-  src/                     界面（掌机外壳、屏幕、按钮、安装流程）
-  src-tauri/               Rust 后端：扫描、解包、调安装器、进度事件
-     src/lib.rs            组件表 + 安装逻辑（要读代码从这里开始）
-     build.rs              release 构建时写入 requireAdministrator 清单
+ui/                            这是程序本体：Vue 3 + Vite 前端，Tauri 2 外壳
+  src/                         界面（掌机外壳、屏幕、按钮、安装流程）
+  src-tauri/                   Rust 后端：扫描、解包、调安装器、进度事件
+     src/lib.rs                组件表 + 安装逻辑（要读代码从这里开始）
+     build.rs                  release 构建时写入 requireAdministrator 清单
 tools/
-  stage_payload.ps1        把官方安装器整理成 payload\（构建前置步骤）
-  list_components.ps1      生成 docs\组件来源与校验.md
-make_release.ps1           一条命令出单文件 exe
-docs/组件来源与校验.md      每个文件的来源、大小、签名、SHA256
+  stage_payload.ps1            把官方安装器整理成 _work\payload（构建前置步骤）
+  list_components.ps1          生成 docs\组件来源与校验.md
+  check_deps.ps1               确认 exe 自己不依赖运行库
+  check_repo.ps1               确认仓库没有本机痕迹和二进制
+make_release.ps1               一条命令出单文件 exe
+docs/组件来源与校验.md          每个文件的来源、大小、签名、SHA256
+_work/                         工作文件（不进仓库，见下）
+  download/                    从微软官方下载的安装器
+  legacy/                      老运行库，需要自备，见 tools\legacy\README.md
+  extracted/                   自解压包拆出来的缓存
+  payload/                     整理好的料，会被打进 exe
 ```
+
+仓库里只有源码和脚本，几百 KB。`_work\` 整个目录在 `.gitignore` 里，
+里面是微软的二进制和构建中间产物。
 
 ## 构建
 
@@ -82,13 +92,14 @@ docs/组件来源与校验.md      每个文件的来源、大小、签名、SHA
 
 ```powershell
 # 1) 准备官方安装器（这一步需要联网）
-#    按 docs\组件来源与校验.md 里的官方地址下载，放到 tools\download\
-#    老运行库（VB5/VB6/CRT70/71）请自行放入 tools\legacy\，见该文档末尾
+#    按 docs\组件来源与校验.md 里的官方地址下载，放到 _work\download\
+#    老运行库（VB5/VB6/CRT70/71、2012/2013 redist）请自行放入 _work\legacy\，
+#    清单见 tools\legacy\README.md
 
-# 2) 整理成 payload
+# 2) 整理成 _work\payload
 .\tools\stage_payload.ps1
 
-# 3) 出单文件 exe（自动内嵌 payload，产物在桌面）
+# 3) 出单文件 exe（自动内嵌 payload，产物在 out\）
 .\make_release.ps1
 
 # 开发调试
@@ -124,11 +135,60 @@ cargo clean -p click    # 在 ui\src-tauri 下
 唯一的运行时依赖是 **WebView2**（界面由它渲染）：Windows 11 内置，
 Windows 10 随 Edge 自动装上。万一缺失，Tauri 会弹提示让你去装，不会静默失败。
 
+## 自己核一遍
+
+这个程序要往系统目录里装东西，所以每一条都应该是能自己验的：
+
+```powershell
+.\tools\check_deps.ps1     # 本程序自己不依赖任何运行库（解析 PE 导入表）
+.\tools\check_repo.ps1     # 仓库里没有本机痕迹、没有微软二进制
+```
+
+再看这两份文档：
+
+- **[docs\组件来源与校验.md](docs/组件来源与校验.md)** —— 每个二进制文件的来源、大小、
+  签名状态和 SHA256。39 个文件里带 Microsoft Corporation 签名的都是微软原版，
+  剩下的老 dll（2002/2003、VB5/VB6）那个年代 Authenticode 还没普及，微软自己发的也没签。
+- **`ui\src-tauri\src\lib.rs`** —— 组件表。装哪几个、什么版本、什么参数、
+  从哪个目录取，全在这一个文件里，不需要翻别处。
+
+## 它跑在哪、写了什么
+
+| | |
+|---|---|
+| 程序本体 | **单文件 exe，放哪都行**。不安装、不注册服务、不写开始菜单 |
+| 解出的运行库 | `C:\ProgramData\Click\payload\<版本>\`（约 67 MB，首次运行解一次，之后复用） |
+| 日志 | `%TEMP%\Click.log`；每个组件的 msiexec 详细日志在 `C:\ProgramData\Click\<组件>\install.log` |
+| 对系统的改动 | **全部由微软安装器完成**：System32 / SysWOW64 / WinSxS、以及"应用和功能"里的卸载项 |
+| 网络 | **不联网**。运行库整个内嵌在 exe 里，安装过程纯本地 |
+| 开机自启 | 无 |
+| 卸载 | 删掉 exe 和 `C:\ProgramData\Click\`；装上的运行库去"应用和功能"里逐个卸载（那是微软安装器的正常卸载） |
+
+## 仓库里有什么、没有什么
+
+**有**：界面源码、Rust 后端、四个 PowerShell 脚本、文档、图标。加起来几百 KB。
+
+**没有**（都在 `.gitignore` 里）：
+
+| 没有的东西 | 为什么 | 怎么补 |
+|---|---|---|
+| `_work\payload\` | 微软的可再发行组件，67 MB | 跑 `tools\stage_payload.ps1` 自动从官方地址下载并整理 |
+| `_work\download\` | 官方安装器下载缓存 | 同上 |
+| `_work\legacy\` | 老运行库，微软官网已下架 | 自备，清单见 `tools\legacy\README.md` |
+| `_work\extracted\` | 拆包缓存 | 脚本自动生成 |
+| `ui\src-tauri\payload.zip` | 内嵌进 exe 的料，构建时生成 | 跑 `make_release.ps1` 自动生成 |
+| `ui\node_modules`、`ui\src-tauri\target` | 依赖和构建产物，4 GB | `pnpm install` / `cargo build` |
+
+所以这个仓库本身**不含任何可执行文件**：读者读到的全是源码，要二进制就去 Release 拿，
+或者自己按上面的步骤构建。
+
 ## 注意
 
 - 未签名，首次运行会被 SmartScreen 拦一下（"更多信息 → 仍要运行"）。
-- 本程序只做两件事：把缺的运行库装上、把过程写进日志。不联网、不驻留、不写注册表
-  以外的系统状态（安装器自己会写注册表，那是微软安装器的正常行为）。
+- 启动即请求管理员权限，因为写系统目录是必须的；UAC 会问一次。
+- 本程序只做两件事：把缺的运行库装上、把过程写进日志。不联网、不驻留、不自启。
+  系统层面的改动（系统目录、WinSxS、注册表卸载项）都是微软安装器写的，
+  装完能在"应用和功能"里看到它们，也能正常卸载。
 
 ## 许可证
 
