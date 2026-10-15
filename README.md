@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/app-icon.png" width="120" alt="咔哒 Clack">
+  <img src="assets/logo.png" width="96" alt="咔哒 Clack">
 </p>
 
 <h1 align="center">咔哒 / Clack</h1>
@@ -12,26 +12,24 @@
   <img src="https://img.shields.io/badge/%E5%8D%95%E6%96%87%E4%BB%B6-63.6%20MB-e9e1cf?style=flat-square" alt="63.6 MB">
 </p>
 
-<p align="center">
-  <img src="assets/screenshot.png" width="340" alt="界面">
-</p>
+<table>
+<tr>
+<td width="230" valign="top"><img src="assets/screenshot.png" width="210" alt="界面"></td>
+<td valign="top">
 
-## 这是什么
+### 这是什么
 
 一个 exe，把 Windows 上那些"缺了就打不开游戏"的运行库补齐。老游戏报 `缺少 msvcr100.dll`、`缺少 msvcp140.dll`，基本都是这个原因。
 
-十个组件：
-
-| | |
-|---|---|
-| Visual Basic VM 5.x / 6.0 | C Runtime 2002 / 2003 |
-| Visual C++ 2005 SP1 | Visual C++ 2008 SP1 |
-| Visual C++ 2010 SP1（含 KB2565063） | Visual C++ 2012 U4 |
-| Visual C++ 2013 | Visual C++ 2015-2022（14.51） |
+十个组件：Visual Basic VM 5.x / 6.0、C Runtime 2002 / 2003、Visual C++ 2005 SP1、2008 SP1、2010 SP1（含 KB2565063）、2012 U4、2013、2015-2022（14.51）。
 
 **x86 和 x64 都装**。32 位程序读的是 `SysWOW64`、64 位读 `System32`，两套是分开的，而老游戏大多是 32 位——只装 64 位它照样缺库。
 
 安装过程完全静默，不会弹出原版安装器那些窗口。
+
+</td>
+</tr>
+</table>
 
 ## 怎么用
 
