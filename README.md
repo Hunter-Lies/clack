@@ -106,5 +106,4 @@ cd ui ; pnpm install ; pnpm tauri dev
 本项目代码 MIT。安装的微软运行库版权归 Microsoft Corporation，按其可再发行条款分发。
 详见 [LICENSE](LICENSE)。
 
-图标：[Font Awesome Free](https://fontawesome.com) 的 `puzzle-piece`（CC BY 4.0，
-署名即本行；本项目只用了这一个图标，颜色和底板是自绘的）。
+图标：[Lucide](https://lucide.dev) 的 `puzzle`（ISC 许可，无需署名；底色与配色自绘）。
