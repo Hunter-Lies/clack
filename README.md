@@ -80,6 +80,6 @@ Tauri 2 + Rust 后端，WebView2 里的 Vue 3 界面，Vite 打包：Tauri `2.12
 
 ## 许可
 
-代码用 [CC BY-NC-SA 4.0](LICENSE)：署名、非商业、相同方式共享——转载或改完再发，留署名、别拿去卖、用同样的协议。
+代码用 [CC BY-NC-SA 4.0](LICENSE)：署名、非商业、相同方式共享。
 
 图标取自 [Lucide](https://lucide.dev)（ISC）。程序安装的那些微软运行库版权归 Microsoft，不在本仓库里。
