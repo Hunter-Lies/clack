@@ -20,7 +20,7 @@ const props = defineProps({
   reboot: { type: Boolean, default: false },
 });
 
-defineEmits(["press"]);
+defineEmits(["press", "restart"]);
 
 const STATUS = {
   idle: "就绪",
@@ -123,7 +123,12 @@ watch(() => props.state, checkFit);
     </div>
 
     <div class="deck">
-      <InstallButton :state="state" @press="$emit('press')" />
+      <InstallButton
+        :state="state"
+        :reboot="reboot"
+        @press="$emit('press')"
+        @restart="$emit('restart')"
+      />
     </div>
   </div>
 </template>

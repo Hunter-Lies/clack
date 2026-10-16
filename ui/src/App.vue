@@ -10,6 +10,7 @@ import {
   onProgress,
   quitApp,
   requestElevation,
+  restartNow,
   scan,
 } from "./lib/api";
 
@@ -192,6 +193,19 @@ function press() {
   start();
 }
 
+/// 完成屏上的「立刻重启」：让 Windows 重启，把那几个等重启才落位的文件换掉。
+/// 解包出来的东西由后端在重启前自己收走。浏览器预览里没系统可重启，退回待命。
+async function restart() {
+  if (!inTauri) {
+    state.value = "idle";
+    percent.value = 0;
+    needReboot.value = false;
+    items.value.forEach((i) => (i.installed = false));
+    return;
+  }
+  await restartNow();
+}
+
 // 关闭键走 mousedown 而不是 click：安装器会抢焦点，那一下点击可能只用来激活窗口、
 // 不会变成 click 事件。按下就动手，用户不会觉得"点了没反应"。
 // 再挂个兜底：正常关窗口没生效就直接结束进程。
@@ -261,6 +275,7 @@ onBeforeUnmount(() => {
         :error="lastError"
         :reboot="needReboot"
         @press="press"
+        @restart="restart"
       />
     </div>
   </div>

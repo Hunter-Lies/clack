@@ -536,6 +536,22 @@ svg {
   margin-top: 12px;
 }
 
+/* 需要重启那种情况：一个键变两个。左边立刻重启（主色，跟平时那个键同款），
+   右边稍后重启（机身色 = 次要动作）。等宽、间距 16px、高度与单键一样，
+   换布局时前后不跳。 */
+.reboot-keys {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.install.ghost {
+  background: var(--char-3);
+  color: var(--beige);
+  box-shadow: 0 5px 0 var(--char-0), 0 11px 20px var(--raised-sm),
+    inset 0 1px 0 var(--unit-top);
+}
+
 .install {
   position: relative;
   width: 100%;

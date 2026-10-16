@@ -27,6 +27,11 @@ export function quitApp() {
   return inTauri ? invoke("quit") : Promise.resolve();
 }
 
+/// 完成屏上「立刻重启」：让 Windows 重启，把那几个等重启才落位的文件换掉
+export function restartNow() {
+  return inTauri ? invoke("restart_now") : Promise.resolve(false);
+}
+
 export function onProgress(cb) {
   return inTauri
     ? listen("install:progress", (e) => cb(e.payload))

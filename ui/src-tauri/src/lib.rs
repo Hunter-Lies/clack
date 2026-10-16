@@ -1270,6 +1270,24 @@ fn is_elevated() -> bool {
     elevated()
 }
 
+/// 完成屏上的「立刻重启」：先把自己摊出来的东西收走，再让 Windows 重启。
+/// 用 shutdown.exe 而不是 ExitWindowsEx：它走的是正常关机流程，有程序拦着的时候
+/// 用户能看见是谁（Windows 会列出来），而不是被硬关一次。
+#[tauri::command]
+fn restart_now() -> bool {
+    log("用户选了立刻重启");
+    cleanup();
+    let ok = Command::new("shutdown.exe")
+        .args(["/r", "/t", "0"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        log("调用 shutdown 失败（多半是权限），请让用户手动重启");
+    }
+    ok
+}
+
 /// 兜底退出：正常关窗口在极端情况下可能不生效（窗口失焦、事件没送到），
 /// 那就直接结束自己。安装器是独立进程，不受影响。
 #[tauri::command]
@@ -1356,6 +1374,7 @@ pub fn run() {
             install,
             is_elevated,
             request_elevation,
+            restart_now,
             open_url,
             quit
         ])
