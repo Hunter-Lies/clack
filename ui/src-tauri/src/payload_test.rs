@@ -57,4 +57,16 @@ mod tests {
         assert_eq!(path_of_source_record("n;1;\\\\server\\share\\"), None);
         assert_eq!(path_of_source_record("http://example.com/x"), None);
     }
+
+    /// 「立刻重启」的前提是能把 SeShutdownPrivilege 打开。跑这条只动自己进程的令牌，
+    /// **不会**真的重启机器；但普通用户/受限账户的令牌里可能没有这个权限，
+    /// 所以默认忽略，需要时手动跑：`cargo test -- --ignored`。
+    #[test]
+    #[ignore = "与账户权限有关，按需手动跑"]
+    fn shutdown_privilege_can_be_enabled() {
+        assert!(
+            crate::enable_shutdown_privilege(),
+            "打开 SeShutdownPrivilege 失败，立刻重启那一步会失败"
+        );
+    }
 }

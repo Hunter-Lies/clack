@@ -1271,21 +1271,113 @@ fn is_elevated() -> bool {
 }
 
 /// 完成屏上的「立刻重启」：先把自己摊出来的东西收走，再让 Windows 重启。
-/// 用 shutdown.exe 而不是 ExitWindowsEx：它走的是正常关机流程，有程序拦着的时候
-/// 用户能看见是谁（Windows 会列出来），而不是被硬关一次。
+///
+/// 走 API 而不是 `shutdown.exe`。现场踩到过：从我们这个（GUI、已提权的）进程里
+/// 把 shutdown.exe 当子进程拉起来，它会以 `0xc0000142`（STATUS_DLL_INIT_FAILED）
+/// 挂在加载阶段——继承的句柄加上杀毒软件对子进程的钩子都可能让它这样。
+/// 调 `ExitWindowsEx` 没有这一层，也少开一个控制台窗口。
 #[tauri::command]
 fn restart_now() -> bool {
     log("用户选了立刻重启");
     cleanup();
+    if reboot_now() {
+        return true;
+    }
+    // 兜底：API 那步不成（权限被策略收走之类），再试一次 shutdown.exe
+    log("ExitWindowsEx 没成，退回 shutdown.exe 再试一次");
     let ok = Command::new("shutdown.exe")
         .args(["/r", "/t", "0"])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     if !ok {
-        log("调用 shutdown 失败（多半是权限），请让用户手动重启");
+        log("重启没能自动完成，让用户自己重启");
     }
     ok
+}
+
+/// 打开当前进程令牌里的 `SeShutdownPrivilege`。管理员令牌默认带着它，但是禁用状态，
+/// `ExitWindowsEx` 要求它是打开状态。
+#[cfg(windows)]
+fn enable_shutdown_privilege() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+    use windows_sys::Win32::Security::{
+        AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+        SE_SHUTDOWN_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token = std::ptr::null_mut();
+        if OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        ) == 0
+        {
+            log("拿不到自己的令牌，重启这步跳过");
+            return false;
+        }
+        let mut luid = std::mem::zeroed();
+        if LookupPrivilegeValueW(std::ptr::null(), SE_SHUTDOWN_NAME, &mut luid) == 0 {
+            CloseHandle(token);
+            log("查不到 SeShutdownPrivilege");
+            return false;
+        }
+        let mut tp = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
+        };
+        // 这个 API 就算没成也可能返回 TRUE，所以要再看一次 GetLastError
+        let ok = AdjustTokenPrivileges(
+            token,
+            0,
+            &mut tp,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ) != 0
+            && GetLastError() == 0;
+        if !ok {
+            log("SeShutdownPrivilege 没能打开，重启大概率会失败");
+        }
+        CloseHandle(token);
+        ok
+    }
+}
+
+#[cfg(not(windows))]
+fn enable_shutdown_privilege() -> bool {
+    false
+}
+
+/// 立刻重启。
+#[cfg(windows)]
+fn reboot_now() -> bool {
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::System::Shutdown::{
+        ExitWindowsEx, EWX_FORCEIFHUNG, EWX_REBOOT, SHTDN_REASON_MAJOR_APPLICATION,
+    };
+
+    unsafe {
+        let _ = enable_shutdown_privilege();
+        // EWX_FORCEIFHUNG：只在有程序卡住时才强关，正常情况下还是走正常的关机流程
+        if ExitWindowsEx(EWX_REBOOT | EWX_FORCEIFHUNG, SHTDN_REASON_MAJOR_APPLICATION) != 0 {
+            log("已请求系统重启");
+            true
+        } else {
+            log(&format!("ExitWindowsEx 失败：{}", GetLastError()));
+            false
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn reboot_now() -> bool {
+    false
 }
 
 /// 兜底退出：正常关窗口在极端情况下可能不生效（窗口失焦、事件没送到），
