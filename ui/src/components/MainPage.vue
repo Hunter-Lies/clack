@@ -16,6 +16,8 @@ const props = defineProps({
   failed: { type: Number, default: 0 },
   /// 最后一条失败原因（"msiexec 返回 1603" 这种），出问题时直接摆在状态行上
   error: { type: String, default: "" },
+  /// 有东西要重启一次才生效（安装器返回 3010，或某个 dll 只能安排到重启时替换）
+  reboot: { type: Boolean, default: false },
 });
 
 defineEmits(["press"]);
@@ -53,8 +55,12 @@ watch(() => props.state, checkFit);
 <template>
   <div class="page">
     <ScreenPanel>
-      <!-- 装完就把清单和状态行全撤掉，屏幕上只留一个圈打勾 -->
-      <FinishMark v-if="state === 'done'" />
+      <!-- 装完就把清单和状态行全撤掉，屏幕上只留一个圈打勾。
+           需要重启才生效的那种，在圈下面补一句，免得用户装完直接进游戏发现没变化 -->
+      <div v-if="state === 'done'" class="done-wrap">
+        <FinishMark />
+        <p v-if="reboot" class="reboot">重启一次才生效</p>
+      </div>
       <template v-else>
         <div ref="rowsEl" class="rows" :class="{ scrollable }">
           <div

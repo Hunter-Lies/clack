@@ -5,7 +5,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Once;
 use tauri::{AppHandle, Emitter, Manager};
 
 /// 安装进行中。这段时间不允许关窗口——半截被打断最难收拾。
@@ -18,8 +17,13 @@ static RELAUNCHING: AtomicBool = AtomicBool::new(false);
 /// 59 MB 解一遍不便宜，多个组件同时缺文件时没必要每个都重解。
 static REEXTRACTED: AtomicBool = AtomicBool::new(false);
 
-/// 日志文件第一次写入前做一次准备（清空上一次运行留下的内容）
-static LOG_READY: Once = Once::new();
+/// 这次运行有没有安排"重启后再替换"的东西（老 dll 被占用时会走这条路）。
+/// 有的话，界面上要提示用户重启一次才生效。
+static REBOOT_NEEDED: AtomicBool = AtomicBool::new(false);
+
+/// 这次运行是不是第一个实例。用户双击两遍时，第二个实例不负责清 payload
+/// ——它要是清了，正在装的那个实例会当场缺文件。
+static FIRST_INSTANCE: AtomicBool = AtomicBool::new(true);
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -51,52 +55,56 @@ struct Comp {
     /// Exe 的静默参数。几代安装器的开关都不一样：2005 只认 /Q，
     /// 2008/2010 是 /Q /NORESTART，2012 之后才是 /install /quiet /norestart
     args: &'static [&'static str],
+    /// MSI 那一类的 ProductCode（照我们包里那份 MSI 的属性表抄的，固定不变）。
+    /// 只在一处用：1612 时把这个目录补进 Windows 的安装源列表，见 msi_retry_with_source()。
+    /// 非 MSI 的组件留空。
+    pcode: &'static str,
 }
 
 // 不做"装没装"的判断，全部照装。安装器本身幂等（已有会返回 1638 / 0），
 // 而漏装的代价远大于多花几十秒——检测一旦判错，用户就是拿着一台依然缺库的机器。
 const COMPS: &[Comp] = &[
     Comp { id: "vb5", group: "vb5", name: "Visual Basic VM 5.x", version: "5.02.8244", arch: Arch::X86, kind: Kind::Dll,
-        dir: "01_VB5_VM/x86", files: &["MSVBVM50.DLL"], args: &[] },
+        dir: "01_VB5_VM/x86", files: &["MSVBVM50.DLL"], args: &[], pcode: "" },
     Comp { id: "vb6", group: "vb6", name: "Visual Basic VM 6.0", version: "6.00.9802", arch: Arch::X86, kind: Kind::Dll,
-        dir: "02_VB6_VM/x86", files: &["MSVBVM60.DLL"], args: &[] },
+        dir: "02_VB6_VM/x86", files: &["MSVBVM60.DLL"], args: &[], pcode: "" },
     Comp { id: "crt70", group: "crt70", name: "C Runtime 2002", version: "7.00.9981", arch: Arch::X86, kind: Kind::Dll,
         dir: "03_CRT_2002/x86",
-        files: &["MSVCR70.DLL", "MSVCP70.DLL", "atl70.dll", "mfc70.dll", "mfc70u.dll", "mfc70chs.dll"], args: &[] },
+        files: &["MSVCR70.DLL", "MSVCP70.DLL", "atl70.dll", "mfc70.dll", "mfc70u.dll", "mfc70chs.dll"], args: &[], pcode: "" },
     Comp { id: "crt71", group: "crt71", name: "C Runtime 2003", version: "7.10.3078", arch: Arch::X86, kind: Kind::Dll,
         dir: "04_CRT_2003/x86",
-        files: &["MSVCR71.DLL", "MSVCP71.DLL", "atl71.dll", "MFC71.DLL", "mfc71u.dll", "mfc71chs.dll"], args: &[] },
+        files: &["MSVCR71.DLL", "MSVCP71.DLL", "atl71.dll", "MFC71.DLL", "mfc71u.dll", "mfc71chs.dll"], args: &[], pcode: "" },
     // 2005/2008/2010：装的是"MSI + 它自己的 CAB"，由 msiexec /qn 直接跑。
     // 不走官方的自解压 exe，是因为那层壳内部还会调 msiexec 弹进度框；
     // 而且这几代的 MSI 少了同目录的 CAB 就会失败（1620/1635），所以两个文件必须一起在。
     Comp { id: "vc2005_x86", group: "vc2005", name: "Visual C++ 2005 SP1", version: "8.0.61001", arch: Arch::X86, kind: Kind::Msi,
-        dir: "05_VC2005/x86", files: &["vcredist.msi"], args: &[] },
+        dir: "05_VC2005/x86", files: &["vcredist.msi"], args: &[], pcode: "{710f4c1c-cc18-4c49-8cbf-51240c89a1a2}" },
     Comp { id: "vc2005_x64", group: "vc2005", name: "Visual C++ 2005 SP1 (x64)", version: "8.0.61001", arch: Arch::X64, kind: Kind::Msi,
-        dir: "05_VC2005/x64", files: &["vcredist.msi"], args: &[] },
+        dir: "05_VC2005/x64", files: &["vcredist.msi"], args: &[], pcode: "{ad8a2fa1-06e7-4b0d-927d-6e54b3d31028}" },
     Comp { id: "vc2008_x86", group: "vc2008", name: "Visual C++ 2008 SP1", version: "9.0.30729.6161", arch: Arch::X86, kind: Kind::Msi,
-        dir: "06_VC2008/x86", files: &["vc_red.msi"], args: &[] },
+        dir: "06_VC2008/x86", files: &["vc_red.msi"], args: &[], pcode: "{9BE518E6-ECC6-35A9-88E4-87755C07200F}" },
     Comp { id: "vc2008_x64", group: "vc2008", name: "Visual C++ 2008 SP1 (x64)", version: "9.0.30729.6161", arch: Arch::X64, kind: Kind::Msi,
-        dir: "06_VC2008/x64", files: &["vc_red.msi"], args: &[] },
+        dir: "06_VC2008/x64", files: &["vc_red.msi"], args: &[], pcode: "{5FCE6D76-F5DC-37AB-B2B8-22AB8CEDB1D4}" },
     // 2010 的 SP1 补丁（KB2565063）就在同目录，装完 MSI 会自动接着打上
     Comp { id: "vc2010_x86", group: "vc2010", name: "Visual C++ 2010 SP1", version: "10.0.40219.473", arch: Arch::X86, kind: Kind::Msi,
-        dir: "07_VC2010/x86", files: &["vc_red.msi"], args: &[] },
+        dir: "07_VC2010/x86", files: &["vc_red.msi"], args: &[], pcode: "{F0C3E5D1-1ADE-321E-8167-68EF0DE699A5}" },
     Comp { id: "vc2010_x64", group: "vc2010", name: "Visual C++ 2010 SP1 (x64)", version: "10.0.40219.473", arch: Arch::X64, kind: Kind::Msi,
-        dir: "07_VC2010/x64", files: &["vc_red.msi"], args: &[] },
+        dir: "07_VC2010/x64", files: &["vc_red.msi"], args: &[], pcode: "{1D8E6291-B0D5-35EC-8441-6616F567A0F7}" },
     // 注意文件名：2012/2013 这两代官方包就叫 vc_redist2012_x86.exe 这种，
     // 不是 2015-2022 那份的 vc_redist.x86.exe。写错的表现是
     // "启动安装器失败：系统找不到指定的文件 (os error 2)"——文件其实在，只是名字对不上。
     Comp { id: "vc2012_x86", group: "vc2012", name: "Visual C++ 2012 U4", version: "11.0.61030", arch: Arch::X86, kind: Kind::Exe,
-        dir: "08_VC2012/x86", files: &["vc_redist2012_x86.exe"], args: &["/install", "/quiet", "/norestart"] },
+        dir: "08_VC2012/x86", files: &["vc_redist2012_x86.exe"], args: &["/install", "/quiet", "/norestart"], pcode: "" },
     Comp { id: "vc2012_x64", group: "vc2012", name: "Visual C++ 2012 U4 (x64)", version: "11.0.61030", arch: Arch::X64, kind: Kind::Exe,
-        dir: "08_VC2012/x64", files: &["vc_redist2012_x64.exe"], args: &["/install", "/quiet", "/norestart"] },
+        dir: "08_VC2012/x64", files: &["vc_redist2012_x64.exe"], args: &["/install", "/quiet", "/norestart"], pcode: "" },
     Comp { id: "vc2013_x86", group: "vc2013", name: "Visual C++ 2013", version: "12.0.40664", arch: Arch::X86, kind: Kind::Exe,
-        dir: "09_VC2013/x86", files: &["vc_redist2013_x86.exe"], args: &["/install", "/quiet", "/norestart"] },
+        dir: "09_VC2013/x86", files: &["vc_redist2013_x86.exe"], args: &["/install", "/quiet", "/norestart"], pcode: "" },
     Comp { id: "vc2013_x64", group: "vc2013", name: "Visual C++ 2013 (x64)", version: "12.0.40664", arch: Arch::X64, kind: Kind::Exe,
-        dir: "09_VC2013/x64", files: &["vc_redist2013_x64.exe"], args: &["/install", "/quiet", "/norestart"] },
+        dir: "09_VC2013/x64", files: &["vc_redist2013_x64.exe"], args: &["/install", "/quiet", "/norestart"], pcode: "" },
     Comp { id: "vc2022_x86", group: "vc2022", name: "Visual C++ 2015-2022", version: "14.51.36247", arch: Arch::X86, kind: Kind::Exe,
-        dir: "10_VC2015-2022_14.51/x86", files: &["vc_redist.x86.exe"], args: &["/install", "/quiet", "/norestart"] },
+        dir: "10_VC2015-2022_14.51/x86", files: &["vc_redist.x86.exe"], args: &["/install", "/quiet", "/norestart"], pcode: "" },
     Comp { id: "vc2022_x64", group: "vc2022", name: "Visual C++ 2015-2022 (x64)", version: "14.51.36247", arch: Arch::X64, kind: Kind::Exe,
-        dir: "10_VC2015-2022_14.51/x64", files: &["vc_redist.x64.exe"], args: &["/install", "/quiet", "/norestart"] },
+        dir: "10_VC2015-2022_14.51/x64", files: &["vc_redist.x64.exe"], args: &["/install", "/quiet", "/norestart"], pcode: "" },
     // VSTOR 也是缺 cab 的那一类（1619），用官方 vstor_redist 里自带的安装器
     // 不做 VSTOR（VS 2010 Tools for Office）：那是给老 Office 的 VSTO 插件用的运行时，
     // 跟游戏无关。而且它在 64 位系统上要么缺 install.ini（1308）、要么被 MSI 自己拒绝
@@ -128,6 +136,8 @@ struct Progress {
 struct Done {
     ok: bool,
     failed: Vec<String>,
+    /// 有东西要重启一次才生效（3010 / 1641，或某个 dll 只能安排到重启时替换）
+    reboot: bool,
 }
 
 // ---------- 路径 ----------
@@ -137,21 +147,33 @@ struct Done {
 #[cfg(not(debug_assertions))]
 const PAYLOAD_ZIP: &[u8] = include_bytes!("../payload.zip");
 
-/// 同时打到控制台（开发时看）和 %TEMP%\Click.log（用户出问题直接把文件发过来）
+/// 日志放 `C:\ProgramData\Click\Click.log`，不用 `%TEMP%`。
+/// 标准账户 + UAC 里输管理员密码时，提权进程的 `%TEMP%` 是那个管理员账户的，
+/// 日志会溜到别的用户目录去，用户"把日志发过来"发来的就不是这份。
+/// 这里路径固定、纯 ASCII、普通权限也读得到。
+fn log_path() -> PathBuf {
+    click_dir().join("Click.log")
+}
+
+/// 每次启动清空日志：一次运行只留一份，用户发过来的就是这一次的完整记录。
+fn reset_log() {
+    let _ = std::fs::create_dir_all(click_dir());
+    // 提权起来的那个进程（带 --elevated）是接着同一个进程的活干的，别把它前面写的内容抹掉
+    if !std::env::args().any(|a| a == "--elevated") {
+        let _ = std::fs::write(log_path(), b"");
+    }
+}
+
+/// 同时打到控制台（开发时看）和 Click.log（用户出问题直接把文件发过来）
 fn log(line: &str) {
     // 别用 println!：正式版没有控制台，stdout 是空句柄，写失败会 panic，
     // 而 release 配了 panic = "abort"，一个日志就能把整个程序带走。
     let _ = writeln!(std::io::stdout(), "[click] {line}");
-    let path = std::env::temp_dir().join("Click.log");
-    LOG_READY.call_once(|| {
-        // 一次运行只留一份日志：没管理员权限时启动的那个进程先把它清空，
-        // 提权起来的那个（带 --elevated）接着往后写。
-        // 一直追加的话文件会越滚越大，用户真出事发过来的那份还得自己找最后一段。
-        if !std::env::args().any(|a| a == "--elevated") {
-            let _ = std::fs::write(&path, b"");
-        }
-    });
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path())
+    {
         let _ = writeln!(f, "[click] {line}");
     }
 }
@@ -174,40 +196,56 @@ fn payload_dir() -> PathBuf {
         .join(env!("CARGO_PKG_VERSION"))
 }
 
-/// 退出前收拾现场：解出来的 payload（60 多 MB）和拷进各组件目录的临时安装包
-/// （MSI / CAB / MSP，加起来还有几十 MB）都只为这一次运行存在。
-/// 各组件目录里的 install.log 留着——那是 msiexec 的日志，出问题要看的就是它。
-/// 下次启动重新解一遍，一两秒的事。
-/// 强杀进程（任务管理器）时来不及跑，那种情况会剩下目录：再正常开关一次就能清掉。
+/// Windows 安装器那一类文件的后缀。这几个是"源码"：装完之后得留在原地。
+const MSI_EXTS: &[&str] = &["msi", "cab", "msp"];
+
+fn has_ext(p: &Path, exts: &[&str]) -> bool {
+    p.extension()
+        .map(|x| x.to_string_lossy().to_lowercase())
+        .map(|x| exts.contains(&x.as_str()))
+        .unwrap_or(false)
+}
+
+/// 退出前把解出来的 payload 收走：它只为这一次运行存在，下次启动重新解一遍。
+/// 顺手清掉组件表里已经没有的目录（老版本留下的残渣）。
+///
+/// 但 **2005 / 2008 / 2010 这三代的 MSI + CAB 必须留下**。它们是
+/// "MSI 引用同目录 CAB"的结构，Windows 在装的时候把这个目录记成这批运行库的
+/// 安装源；以后系统做修复、重装、打补丁都要回这里取 CAB。删掉它，那台机器上
+/// 这几代就会回 `msiexec 返回 1612`——用户装的第一次是好的，之后系统一修就坏。
+/// install.log / install-retry.log 也留在这儿，出问题要看的就是它。
+///
+/// 散装 dll 和 2012 之后的自解压安装器没有这个问题（它们各自带全了文件），
+/// 一并不留，省那几十 MB。
+///
+/// 强杀进程（任务管理器）时来不及跑，那种情况 payload 会剩下：再正常开关一次即可。
 fn cleanup() {
-    if RELAUNCHING.load(Ordering::SeqCst) || BUSY.load(Ordering::SeqCst) {
+    if RELAUNCHING.load(Ordering::SeqCst)
+        || BUSY.load(Ordering::SeqCst)
+        || !FIRST_INSTANCE.load(Ordering::SeqCst)
+    {
         return;
     }
     let base = click_dir();
 
+    // 1) 解出来的那份整个删掉（连旧版本的目录一起），下次启动重解一遍就是了
     let payload = base.join("payload");
-    if payload.is_dir() {
-        match std::fs::remove_dir_all(&payload) {
-            Ok(()) => log(&format!("已清理 {}", payload.display())),
-            Err(e) => log(&format!("清理 {} 失败：{e}", payload.display())),
-        }
+    if payload.is_dir() && std::fs::remove_dir_all(&payload).is_err() {
+        log(&format!("清理 {} 失败（多半是有文件被占着），下次再试", payload.display()));
     }
 
-    let Ok(entries) = std::fs::read_dir(&base) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let Ok(files) = std::fs::read_dir(e.path()) else {
-            continue;
-        };
-        for f in files.flatten() {
-            let p = f.path();
-            let ext = p
-                .extension()
-                .map(|x| x.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            if matches!(ext.as_str(), "msi" | "cab" | "msp") {
-                let _ = std::fs::remove_file(&p);
+    // 2) 组件目录里那些"这一代用不上"的残留（比如 1.0.0 留下的 vstor_x86），
+    //    组件表里已经没有它们了，不会有人再往里写。MSI / CAB 与日志留着。
+    let known: Vec<&str> = COMPS.iter().map(|c| c.id).collect();
+    if let Ok(entries) = std::fs::read_dir(&base) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let p = e.path();
+            if !p.is_dir() || name == "payload" || known.contains(&name.as_str()) {
+                continue;
+            }
+            if std::fs::remove_dir_all(&p).is_ok() {
+                log(&format!("清掉用不上的目录 {name}"));
             }
         }
     }
@@ -279,6 +317,203 @@ fn target_dir(arch: Arch) -> PathBuf {
     }
 }
 
+/// 读文件的固定版本（VS_FIXEDFILEINFO 的四段数字）。
+/// 不用 FileVersion 字符串：那玩意带 `(WGGT_OCT06.Release)` 这种后缀，比不了。
+/// 读不出来（0 字节、被截断、被换成别的东西、本来就没版本资源）返回 None。
+#[cfg(windows)]
+fn file_version(path: &Path) -> Option<[u32; 4]> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
+
+    // VS_FIXEDFILEINFO 在 windows-sys 里没导出，按官方布局自己定义
+    #[repr(C)]
+    struct FixedFileInfo {
+        signature: u32,
+        struc_version: u32,
+        file_version_ms: u32,
+        file_version_ls: u32,
+        product_version_ms: u32,
+        product_version_ls: u32,
+        file_flags_mask: u32,
+        file_flags: u32,
+        file_os: u32,
+        file_type: u32,
+        file_subtype: u32,
+        file_date_ms: u32,
+        file_date_ls: u32,
+    }
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let mut handle: u32 = 0;
+        let size = GetFileVersionInfoSizeW(wide.as_ptr(), &mut handle);
+        if size == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        if GetFileVersionInfoW(wide.as_ptr(), 0, size, buf.as_mut_ptr() as *mut _) == 0 {
+            return None;
+        }
+        let sub: Vec<u16> = "\\".encode_utf16().chain(std::iter::once(0)).collect();
+        let mut ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+        let mut len: u32 = 0;
+        if VerQueryValueW(buf.as_ptr() as *const _, sub.as_ptr(), &mut ptr, &mut len) == 0
+            || ptr.is_null()
+            || (len as usize) < std::mem::size_of::<FixedFileInfo>()
+        {
+            return None;
+        }
+        let info = &*(ptr as *const FixedFileInfo);
+        if info.signature != 0xFEEF_04BD {
+            return None;
+        }
+        let v = [
+            info.file_version_ms >> 16,
+            info.file_version_ms & 0xFFFF,
+            info.file_version_ls >> 16,
+            info.file_version_ls & 0xFFFF,
+        ];
+        if v == [0, 0, 0, 0] {
+            return None;
+        }
+        Some(v)
+    }
+}
+
+#[cfg(not(windows))]
+fn file_version(_path: &Path) -> Option<[u32; 4]> {
+    None
+}
+
+/// 谁正拿着这个文件。用 Windows 自己的重启管理器问——安装程序那句
+/// "关掉正在使用本程序的应用"就是这套 API，比自己枚举句柄稳。
+/// 需要管理员权限（我们启动时就要了）。
+#[cfg(windows)]
+fn kill_lockers(paths: &[PathBuf]) -> Vec<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::RestartManager::{
+        RmEndSession, RmForceShutdown, RmGetList, RmRegisterResources, RmShutdown, RmStartSession,
+        RM_PROCESS_INFO,
+    };
+
+    let mut names: Vec<String> = Vec::new();
+    let wide: Vec<Vec<u16>> = paths
+        .iter()
+        .map(|p| p.as_os_str().encode_wide().chain(std::iter::once(0)).collect())
+        .collect();
+    let ptrs: Vec<*const u16> = wide.iter().map(|w| w.as_ptr()).collect();
+
+    unsafe {
+        let mut session: u32 = 0;
+        let mut key = [0u16; 33]; // CCH_RM_SESSION_KEY + 1
+        if RmStartSession(&mut session, 0, key.as_mut_ptr()) != 0 {
+            return names;
+        }
+        if RmRegisterResources(
+            session,
+            ptrs.len() as u32,
+            ptrs.as_ptr(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+        ) == 0
+        {
+            let mut need: u32 = 0;
+            let mut count: u32 = 0;
+            let mut reasons: u32 = 0;
+            // 第一遍只为问出"要几个 RM_PROCESS_INFO"（返回 ERROR_MORE_DATA）
+            RmGetList(session, &mut need, &mut count, std::ptr::null_mut(), &mut reasons);
+            if need > 0 {
+                let mut infos: Vec<RM_PROCESS_INFO> = (0..need).map(|_| std::mem::zeroed()).collect();
+                count = need;
+                if RmGetList(session, &mut need, &mut count, infos.as_mut_ptr(), &mut reasons) == 0 {
+                    for info in infos.iter().take(count as usize) {
+                        let name: String = info
+                            .strAppName
+                            .iter()
+                            .take_while(|c| **c != 0)
+                            .map(|c| char::from_u32(*c as u32).unwrap_or('?'))
+                            .collect();
+                        if !name.is_empty() {
+                            names.push(name);
+                        }
+                    }
+                    // 强关：这些进程正拿着我们要写的 dll，不结束没法替换。
+                    // 用户通常还开着游戏，这一步就是把游戏关掉。
+                    RmShutdown(session, RmForceShutdown as u32, None);
+                }
+            }
+        }
+        RmEndSession(session);
+    }
+
+    names.sort();
+    names.dedup();
+    names
+}
+
+#[cfg(not(windows))]
+fn kill_lockers(_paths: &[PathBuf]) -> Vec<String> {
+    Vec::new()
+}
+
+/// 换不了又急着要的那一手：新文件先放旁边，让 Windows 下次重启时替换掉。
+/// 安装程序那句"重启后生效"就是这么来的。
+#[cfg(windows)]
+fn schedule_replace_on_reboot(from: &Path, to: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
+
+    let staging = to.with_extension("dll.new");
+    if std::fs::copy(from, &staging).is_err() {
+        return false;
+    }
+    let wide = |p: &Path| -> Vec<u16> {
+        p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    };
+    let (a, b) = (wide(&staging), wide(to));
+    unsafe { MoveFileExW(a.as_ptr(), b.as_ptr(), MOVEFILE_DELAY_UNTIL_REBOOT) != 0 }
+}
+
+#[cfg(not(windows))]
+fn schedule_replace_on_reboot(_from: &Path, _to: &Path) -> bool {
+    false
+}
+
+/// 把一个 dll 放进系统目录：直接复制；被占用就强关占用它的进程，再复制；
+/// 还不行就安排到下次重启替换。三条都不通的报错文案里带上两个完整路径。
+fn copy_into_place(from: &Path, to: &Path) -> Result<(), String> {
+    match std::fs::copy(from, to) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let who = kill_lockers(&[to.to_path_buf()]);
+            if !who.is_empty() {
+                log(&format!("{} 被 {} 占用，先关掉它们", to.display(), who.join("、")));
+            }
+            if std::fs::copy(from, to).is_ok() {
+                return Ok(());
+            }
+            if schedule_replace_on_reboot(from, to) {
+                log(&format!("{} 当前换不了，已安排下次重启时替换", to.display()));
+                REBOOT_NEEDED.store(true, Ordering::SeqCst);
+                return Ok(());
+            }
+            Err(format!(
+                "{} 复制到 {} 失败：{e}（占用它的进程也没关掉，关掉程序或重启后再运行一次）",
+                from.display(),
+                to.display()
+            ))
+        }
+    }
+}
+
 /// 打包后从资源目录找；开发时直接指项目里的 payload（也能用 CLACK_PAYLOAD 覆盖）
 fn payload_root(app: &AppHandle) -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CLACK_PAYLOAD") {
@@ -313,6 +548,117 @@ fn code_ok(code: Option<i32>) -> bool {
     matches!(code, Some(0) | Some(3010) | Some(1641) | Some(1638))
 }
 
+/// 失败码翻译成人话，贴在界面那行后面。数字本身说明不了任何事，
+/// 而这几条恰恰是网上答案最统一的一类故障，先给用户一句结论。
+fn hint(code: i32) -> &'static str {
+    match code {
+        1612 => "（这台机器上还留着旧的安装记录，当初那个安装源已经不在了）",
+        1610 => "（已装那套运行库的注册信息坏了）",
+        1619 => "（安装包打不开：路径或权限）",
+        1603 => "（安装过程报错，明细在这个组件的 install.log 里）",
+        1605 => "（系统里没有这个产品，只在卸载时才会遇到）",
+        1618 => "（这台机器上还有另一个安装正在进行，关掉它再试）",
+        1730 => "（包里的一个文件对不上，多半是源目录不全）",
+        1925 => "（要管理员权限才能装）",
+        _ => "",
+    }
+}
+
+/// vc_redist 那三个自解压安装器（2012 / 2013 / 2015-2022）失败时的说法和自己一套。
+/// 它们的日志写在 `%TEMP%\dd_vcredist*.log`，不在组件目录里。
+fn hint_exe(code: i32) -> &'static str {
+    match code {
+        1603 => "（安装器报致命错误，明细见 %TEMP%\\dd_vcredist_*.log）",
+        1638 => "（这台机器上已经装了更新或同版本，这次没动它）",
+        1925 => "（要管理员权限才能装）",
+        _ => hint(code),
+    }
+}
+
+/// 跑一次 msiexec。verb 是 `/i`（装）、`/f`（修复）或 `/p`（打补丁），
+/// 日志固定写到 log_path。返回 msiexec 的退出码；进程都起不来才算 Err。
+fn msiexec(pkg: &Path, verb: &str, props: &[&str], log_path: &Path) -> Result<i32, String> {
+    let st = Command::new("msiexec.exe")
+        .arg(verb)
+        .arg(pkg)
+        .args(["/qn", "/norestart"])
+        .args(props)
+        .arg("/l*v")
+        .arg(log_path)
+        .status()
+        .map_err(|e| format!("启动 msiexec 失败：{e}"))?;
+    Ok(st.code().unwrap_or(-1))
+}
+
+/// 我们手上这个包跟这台机器上已装的那一套撞了（1612：Windows 记着"已安装"，
+/// 但当初的安装源、连同 `C:\Windows\Installer` 里的缓存包都被清理工具扫掉了）。
+///
+/// 只把目录加进安装源列表还不够：普通 `/i` 走的是"改已装的配置"这条路，它是去读
+/// 那个已经不存在的缓存包，不看我们命令行上给的包。所以要再用 `/f` 强制从包的
+/// 实际位置重新读一遍——`REINSTALLMODE=vomus` 覆盖全部文件、`REINSTALL=ALL`
+/// 覆盖全部组件，这两条合起来才会让 Windows Installer 用我们这份。
+fn msi_retry_with_source(c: &Comp, msi: &Path, stage: &Path, first_log: &Path, code: i32) -> Result<i32, String> {
+    log(&format!(
+        "msiexec 返回 {code}（旧的安装记录还在，但缓存包/安装源已经不在了）。日志：{}",
+        first_log.display()
+    ));
+    if c.pcode.is_empty() {
+        return Ok(code);
+    }
+    let src = format!("{}\\", stage.display());
+    if add_msi_source(c.pcode, &src) {
+        log(&format!("已把 {src} 补进这套运行库的安装源列表"));
+    } else {
+        log("往安装源列表里加这一条没成功（多半是没权限），还是照试");
+    }
+    // /f 的 pkg 位置参数就是"从哪儿读安装包"，这一步绕开了那个不存在的缓存包
+    let retry_log = stage.join("install-retry.log");
+    let retry_code = msiexec(
+        msi,
+        "/f",
+        &["REINSTALL=ALL", "REINSTALLMODE=vomus"],
+        &retry_log,
+    )?;
+    if code_ok(Some(retry_code)) {
+        log(&format!("强制重装修复成功，{} 装上了", c.id));
+    } else {
+        log(&format!(
+            "强制重装修复还是 {retry_code}，日志：{}",
+            retry_log.display()
+        ));
+    }
+    Ok(retry_code)
+}
+
+/// 把我们的目录补进这个产品的"安装源列表"（官方 API：MsiSourceListAddSourceEx）。
+///
+/// 为什么需要它：Windows 对"已经装过"的 MSI 产品，重装时会先去记录的源目录找安装包，
+/// 而不是用我们命令行上给的这个包。机器上那个源目录要是没了（别人家的合集从临时目录装的、
+/// U 盘、解压完就删的临时文件夹），就会一直回 1612；把我们的目录加进去，它才找得到。
+///
+/// 上下文必须给对：vcredist 都是按"每台机器"装的，源列表按上下文分开存，机器上下文是 4，
+/// 当前用户那份是 2。两个都补一遍；返回码原样写进日志——返回码是排查这件事唯一的线索。
+fn add_msi_source(product: &str, source_dir: &str) -> bool {
+    use windows_sys::Win32::System::ApplicationInstallationAndServicing::{
+        MsiSourceListAddSourceExW, MSIINSTALLCONTEXT_MACHINE, MSIINSTALLCONTEXT_USERUNMANAGED,
+    };
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let (product, source) = (wide(product), wide(source_dir));
+    let mut ok = false;
+    for (ctx, who) in [
+        (MSIINSTALLCONTEXT_MACHINE, "机器"),
+        (MSIINSTALLCONTEXT_USERUNMANAGED, "当前用户"),
+    ] {
+        // dwOptions = 0：只往上加，不动已有的条目
+        let rc = unsafe {
+            MsiSourceListAddSourceExW(product.as_ptr(), std::ptr::null(), ctx, 0, source.as_ptr(), 0)
+        };
+        log(&format!("把 {source_dir} 加进{who}上下文的安装源列表：返回 {rc}"));
+        ok |= rc == 0;
+    }
+    ok
+}
+
 fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
     let dir = root.join(c.dir);
     if !dir.is_dir() {
@@ -327,15 +673,39 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
             for f in c.files {
                 let from = dir.join(f);
                 if !from.is_file() {
-                    return Err(format!("缺文件 {f}"));
+                    return Err(format!("payload 里缺 {}", from.display()));
                 }
                 let to = dest.join(f);
-                // 散装 dll 只补缺：正在被程序加载的系统 dll 覆盖会直接失败（共享冲突），
-                // 而且这一类"文件在就能用"，存在即正确。
-                if to.is_file() {
+                // 散装 dll 只补缺、只往新的走：
+                //   · 系统里没有 → 复制
+                //   · 有，但比我们这份旧、或读不出内容（0 字节 / 被截断） → 覆盖
+                //   · 版本相同或更新 → 不动（微软的安全更新、别的程序钉住的版本都留着）
+                // 正在被加载的 dll 直接覆盖会共享冲突，那就让占用它的进程先退出再试一次，
+                // 还不行就安排到下次重启时替换——用户那边顶多是"这次没生效"。
+                let same_or_newer = match (file_version(&from), file_version(&to)) {
+                    (Some(pv), Some(tv)) => tv >= pv,
+                    _ => false,
+                };
+                if same_or_newer {
+                    log(&format!("{} 已是同版本或更新，不动", to.display()));
                     continue;
                 }
-                std::fs::copy(&from, &to).map_err(|e| format!("{f} 复制失败：{e}"))?;
+                let existed = to.is_file();
+                if let Err(e) = copy_into_place(&from, &to) {
+                    return Err(e);
+                }
+                if existed {
+                    log(&format!("{} 是旧的/坏的，已覆盖", to.display()));
+                }
+                // 核一下大小，别把"半截文件"当成装好了（杀毒软件拦下来的常见表现）
+                let want = std::fs::metadata(&from).map(|m| m.len()).unwrap_or(0);
+                let got = std::fs::metadata(&to).map(|m| m.len()).unwrap_or(0);
+                if want != got {
+                    return Err(format!(
+                        "{} 复制后大小不对（{got} != {want}），可能被杀毒软件拦了",
+                        to.display()
+                    ));
+                }
             }
             Ok(())
         }
@@ -356,44 +726,68 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
             std::fs::create_dir_all(&stage).map_err(|e| format!("建临时目录失败：{e}"))?;
             for e in std::fs::read_dir(&dir).map_err(|e| format!("读组件目录失败：{e}"))?.flatten() {
                 let p = e.path();
-                let ext = p
-                    .extension()
-                    .map(|x| x.to_string_lossy().to_lowercase())
-                    .unwrap_or_default();
-                if matches!(ext.as_str(), "msi" | "cab" | "msp") {
+                if has_ext(&p, MSI_EXTS) {
                     let to = stage.join(p.file_name().unwrap_or_default());
                     std::fs::copy(&p, &to).map_err(|e| format!("复制 {} 失败：{e}", p.display()))?;
                 }
             }
             let msi = stage.join(c.files[0]);
-            let msi_log = stage.join("install.log");
-            let st = Command::new("msiexec.exe")
-                .arg("/i")
-                .arg(&msi)
-                .args(["/qn", "/norestart", "/l*v"])
-                .arg(&msi_log)
-                .status()
-                .map_err(|e| format!("启动 msiexec 失败：{e}"))?;
-            if !code_ok(st.code()) {
-                log(&format!("msiexec 日志：{}", msi_log.display()));
-                return Err(format!("msiexec 返回 {}", st.code().unwrap_or(-1)));
+            let mut msi_log = stage.join("install.log");
+            let mut code = msiexec(&msi, "/i", &[], &msi_log)?;
+
+            // 1612 = 记录还在、缓存包/安装源没了；1610 = 记录坏了；1728 = 包里的
+            // 某个文件找不到（同样是源那一侧的问题）。都走"补源 + 从包本身强制重装"。
+            if !code_ok(Some(code)) && matches!(code, 1612 | 1610 | 1728) {
+                msi_log = stage.join("install-retry.log");
+                code = msi_retry_with_source(c, &msi, &stage, &stage.join("install.log"), code)?;
             }
-            // 同目录里如果有 .msp 补丁就接着打上（2010 SP1 的 KB2565063 就是这样进来的）
-            for e in std::fs::read_dir(&stage).map_err(|e| format!("读临时目录失败：{e}"))?.flatten() {
-                let p = e.path();
-                let is_msp = p.extension().map(|x| x.eq_ignore_ascii_case("msp")).unwrap_or(false);
-                if !is_msp {
-                    continue;
+
+            if !code_ok(Some(code)) {
+                log(&format!("msiexec 日志：{}", msi_log.display()));
+                if code == 1612 {
+                    log("1612 = 系统里还留着旧的安装记录，但当初的安装源已经不在。\
+                         补源重装也没成的话，先用微软官方的「程序安装和卸载疑难解答」清掉那几条旧记录，再跑一次");
                 }
-                log(&format!("打补丁 {}", p.display()));
-                let st = Command::new("msiexec.exe")
-                    .arg("/p")
-                    .arg(&p)
-                    .args(["/qn", "/norestart"])
-                    .status()
-                    .map_err(|e| format!("启动 msiexec 失败：{e}"))?;
-                if !code_ok(st.code()) {
-                    return Err(format!("补丁返回 {}", st.code().unwrap_or(-1)));
+                return Err(format!("msiexec 返回 {code}{}", hint(code)));
+            }
+            // 成功也分几种：0 是真装上了；1638 是"这台机器上已经有一套，这次没动"；
+            // 3010 / 1641 是"装上了但要重启一次才生效"，界面得说一声
+            if code != 0 {
+                log(&format!(
+                    "msiexec 返回 {code}：{}",
+                    match code {
+                        1638 => "这台机器上已经有这套运行库的另一个版本，这次没动它",
+                        3010 | 1641 => "装上了，但系统要求重启一次才生效",
+                        _ => "按成功处理",
+                    }
+                ));
+                if matches!(code, 3010 | 1641) {
+                    REBOOT_NEEDED.store(true, Ordering::SeqCst);
+                }
+            }
+            // 同目录里如果有 .msp 补丁就接着打上（2010 SP1 的 KB2565063 就是这样进来的）。
+            // 只在基础包真装上了（code == 0）才打：1638 说明这次什么都没动，
+            // 往上打补丁没有意义；而补丁本身回 1638 / 1642 只说明"已经打过 / 被更高版本
+            // 顶掉了"，那是正常情况，不该把整行报红。
+            if code == 0 {
+                for e in std::fs::read_dir(&stage).map_err(|e| format!("读临时目录失败：{e}"))?.flatten() {
+                    let p = e.path();
+                    if !p.extension().map(|x| x.eq_ignore_ascii_case("msp")).unwrap_or(false) {
+                        continue;
+                    }
+                    log(&format!("打补丁 {}", p.display()));
+                    let patch_code = msiexec(&p, "/p", &[], &stage.join("patch.log"))?;
+                    match patch_code {
+                        0 => {}
+                        1638 | 1642 => log(&format!(
+                            "补丁返回 {patch_code}：已经打过，或被更高版本替代，跳过"
+                        )),
+                        3010 | 1641 => {
+                            log("补丁装上了，但要求重启一次才生效");
+                            REBOOT_NEEDED.store(true, Ordering::SeqCst);
+                        }
+                        _ => return Err(format!("补丁返回 {patch_code}{}", hint(patch_code))),
+                    }
                 }
             }
             Ok(())
@@ -411,26 +805,54 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                 .args(c.args)
                 .status()
                 .map_err(|e| format!("启动安装器失败：{e}（{}）", file.display()))?;
-            if code_ok(st.code()) {
+            // vc_redist 这种自解压包回的是 HRESULT（0x80070643 之类），低 16 位才是 MSI 那套码：
+            // 0x80070666 其实就是 1638（机器上已经装了更高版本），不归一化就会把
+            // "本来就装好了"报成红。
+            let raw = st.code().unwrap_or(-1);
+            let code = if (raw as u32) >= 0x8007_0000 { raw & 0xFFFF } else { raw };
+            if code_ok(Some(code)) {
+                if matches!(code, 1638) {
+                    log(&format!("{}：这台机器上已经装了更新或同版本，这次没动它", c.id));
+                }
+                if matches!(code, 3010 | 1641) {
+                    REBOOT_NEEDED.store(true, Ordering::SeqCst);
+                }
                 Ok(())
             } else {
-                Err(format!("安装器返回 {}", st.code().unwrap_or(-1)))
+                Err(format!("安装器返回 {code}{}", hint_exe(code)))
             }
         }
     }
 }
 
 fn run_install(app: AppHandle, rows: Vec<String>) {
-    BUSY.store(true, Ordering::SeqCst);
     run_install_inner(&app, rows);
     BUSY.store(false, Ordering::SeqCst);
 }
 
 fn run_install_inner(app: &AppHandle, rows: Vec<String>) {
+    // 没有管理员权限就别往下跑：msiexec 会回 1925、复制进 System32 会拒绝访问，
+    // 最后用户只看到一堆数字，猜不到"是没给管理员权限"。
+    if !elevated() {
+        log("没有管理员权限，拒绝开始安装");
+        let _ = app.emit(
+            "install:done",
+            Done {
+                ok: false,
+                failed: vec!["需要管理员权限：关掉重开一次，在弹窗里点「是」".into()],
+                reboot: false,
+            },
+        );
+        return;
+    }
     let Some(root) = payload_root(app) else {
         let _ = app.emit(
             "install:done",
-            Done { ok: false, failed: vec!["找不到 payload 目录".into()] },
+            Done {
+                ok: false,
+                failed: vec!["找不到 payload 目录".into()],
+                reboot: false,
+            },
         );
         return;
     };
@@ -498,7 +920,14 @@ fn run_install_inner(app: &AppHandle, rows: Vec<String>) {
         }
     }
 
-    let _ = app.emit("install:done", Done { ok: failed.is_empty(), failed });
+    let _ = app.emit(
+        "install:done",
+        Done {
+            ok: failed.is_empty(),
+            failed,
+            reboot: REBOOT_NEEDED.load(Ordering::SeqCst),
+        },
+    );
 }
 
 // ---------- 权限 ----------
@@ -555,8 +984,13 @@ fn relaunch_elevated() -> bool {
             std::ptr::null(),
             SW_SHOWNORMAL,
         );
-        // <= 32 是失败码
-        r as isize > 32
+        // <= 32 是失败码。失败说明 UAC 被拒 / 被策略拦，本进程还得继续活着，
+        // 那就别再拦着自己的清理逻辑——不然这次关窗口 payload 会一直留着
+        let ok = r as isize > 32;
+        if !ok {
+            RELAUNCHING.store(false, Ordering::SeqCst);
+        }
+        ok
     }
 }
 
@@ -585,6 +1019,13 @@ fn scan(app: AppHandle) -> Vec<GroupInfo> {
 
 #[tauri::command]
 fn install(app: AppHandle, rows: Vec<String>) {
+    // 连点两下的守卫：第二次点击直接丢掉。
+    // 两个线程一起装的话，进度事件会互相覆盖，先结束的那个还会把 BUSY 归零，
+    // 让用户在另一个线程还在跑的时候关窗——退出时的清理会把它正在用的文件删掉。
+    if BUSY.swap(true, Ordering::SeqCst) {
+        log("安装已经在跑了，忽略这次重复的请求");
+        return;
+    }
     std::thread::spawn(move || run_install(app, rows));
 }
 
@@ -659,6 +1100,11 @@ fn request_elevation(interactive: bool) -> bool {
 }
 
 pub fn run() {
+    // 日志每次启动重写一份；然后认一下自己是不是第一个实例
+    reset_log();
+    claim_single_instance();
+    log(&format!("咔哒 v{} 启动", env!("CARGO_PKG_VERSION")));
+
     tauri::Builder::default()
         .on_window_event(|_window, event| {
             // 安装中把关闭请求挡回去：Alt+F4、任务栏"关闭窗口"、我们自己的关闭键都会走到这里
@@ -685,6 +1131,26 @@ pub fn run() {
                 cleanup();
             }
         });
+}
+
+/// 抢一个全局互斥体，判断自己是不是这次运行里"第一个"实例。
+/// 用户双击两遍 exe 时，第二个实例照样能用（他只是多点了一下），但**不负责清 payload**：
+/// 它一清，正在装的那个实例就会当场"组件目录不存在"。
+fn claim_single_instance() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+        // ERROR_ALREADY_EXISTS
+        const ALREADY_EXISTS: u32 = 183;
+        let name: Vec<u16> = "Global\\ClackRun\0".encode_utf16().collect();
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        if handle.is_null() || unsafe { windows_sys::Win32::Foundation::GetLastError() } == ALREADY_EXISTS
+        {
+            FIRST_INSTANCE.store(false, Ordering::SeqCst);
+            log("已经有一个咔哒在跑：这次不负责清理解包目录");
+        }
+        // 句柄故意不关：进程活着期间这个锁就得在
+    }
 }
 
 // 组件表 vs payload 的一致性自测（cargo test）

@@ -13,7 +13,7 @@ import {
   scan,
 } from "./lib/api";
 
-const VERSION = "v1.1.0";
+const VERSION = "v1.1.1";
 const STEP_MS = 620;
 
 // 浏览器里单独调 UI（pnpm dev）时用的占位数据。跑在 Tauri 里会被 scan() 的结果替掉。
@@ -36,6 +36,8 @@ const state = ref("idle"); // idle | busy | done | fail
 const percent = ref(0);
 const failed = ref(0);
 const lastError = ref("");
+/// 有东西要重启一次才生效（安装器返回 3010，或某个 dll 只能安排到重启时替换）
+const needReboot = ref(false);
 
 let timer = 0;
 let offs = [];
@@ -54,6 +56,7 @@ if (import.meta.env.DEV) {
   if (s === "done") {
     state.value = "done";
     percent.value = 100;
+    needReboot.value = q.get("reboot") === "1";
     items.value.forEach((i) => (i.installed = true));
   } else if (s) {
     state.value = "busy";
@@ -131,6 +134,7 @@ function handleProgress(p) {
 
 function handleDone(d) {
   percent.value = 100;
+  needReboot.value = !!d.reboot;
   if (d.ok) {
     state.value = "done";
   } else {
@@ -145,9 +149,20 @@ async function start() {
 
   if (!inTauri) return demoRun();
 
+  // 先占住"忙"这个状态再 await：这两次 await 期间用户还能再点一下，
+  // 后端虽然也挡了重入，但界面上先别给第二次机会
+  state.value = "busy";
+
   // 装运行库必须管理员权限。启动时已经拉过一次，这里是兜底：
   // 用户在 UAC 上点了"否"的话，再给一次机会。
-  if (!(await isElevated()) && (await requestElevation(true))) return;
+  if (!(await isElevated())) {
+    if (await requestElevation(true)) return;
+    // UAC 被拒：别硬着头皮往下装，那只会得到一堆"拒绝访问"
+    state.value = "fail";
+    failed.value = 1;
+    lastError.value = "需要管理员权限：重开一次，在弹窗里点「是」";
+    return;
+  }
 
   const ids = items.value.filter((i) => !i.installed).map((i) => i.id);
   if (!ids.length) {
@@ -158,7 +173,6 @@ async function start() {
   failed.value = 0;
   lastError.value = "";
   percent.value = 0;
-  state.value = "busy";
   await installComponents(ids);
 }
 
@@ -245,6 +259,7 @@ onBeforeUnmount(() => {
         :percent="percentText"
         :failed="failed"
         :error="lastError"
+        :reboot="needReboot"
         @press="press"
       />
     </div>

@@ -367,6 +367,27 @@ svg {
   transition: width 0.35s var(--ease);
 }
 
+/* 完成屏：勾还是居中，重启提示贴屏幕下沿，不把那个勾挤歪 */
+.done-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.done-wrap .reboot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 12px;
+  margin: 0;
+  text-align: center;
+  font-size: 12px;
+  letter-spacing: 0;
+  color: var(--orange);
+  opacity: 0.92;
+}
+
 /* ---------- 装完那一屏 ---------- */
 .finish {
   position: relative;
