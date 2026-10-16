@@ -13,7 +13,7 @@ import {
   scan,
 } from "./lib/api";
 
-const VERSION = "v1.1.2";
+const VERSION = "v1.1.3";
 const STEP_MS = 620;
 
 // 浏览器里单独调 UI（pnpm dev）时用的占位数据。跑在 Tauri 里会被 scan() 的结果替掉。
@@ -36,7 +36,7 @@ const state = ref("idle"); // idle | busy | done | fail
 const percent = ref(0);
 const failed = ref(0);
 const lastError = ref("");
-/// 有东西要重启一次才生效（安装器返回 3010，或某个 dll 只能安排到重启时替换）
+/// 兜底：有东西要重启电脑之后才生效（安装器返回 3010，或某个 dll 只能安排到重启时替换）
 const needReboot = ref(false);
 
 let timer = 0;

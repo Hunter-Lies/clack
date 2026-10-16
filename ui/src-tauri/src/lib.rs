@@ -18,7 +18,7 @@ static RELAUNCHING: AtomicBool = AtomicBool::new(false);
 static REEXTRACTED: AtomicBool = AtomicBool::new(false);
 
 /// 这次运行有没有安排"重启后再替换"的东西（老 dll 被占用时会走这条路）。
-/// 有的话，界面上要提示用户重启一次才生效。
+/// 有的话，界面上要提示用户重启电脑之后才生效。
 static REBOOT_NEEDED: AtomicBool = AtomicBool::new(false);
 
 /// 这次运行是不是第一个实例。用户双击两遍时，第二个实例不负责清 payload
@@ -136,7 +136,7 @@ struct Progress {
 struct Done {
     ok: bool,
     failed: Vec<String>,
-    /// 有东西要重启一次才生效（3010 / 1641，或某个 dll 只能安排到重启时替换）
+    /// 兜底：有东西要重启电脑之后才生效（3010 / 1641，或某个 dll 只能安排到重启时替换）
     reboot: bool,
 }
 
@@ -464,6 +464,35 @@ fn kill_lockers(_paths: &[PathBuf]) -> Vec<String> {
     Vec::new()
 }
 
+/// 这一代运行库的核心文件。装之前拿这些路径去问"谁正加载着它"，
+/// 有程序在用就先请它让路——否则安装器一看文件占用，就把替换推到重启（返回 3010），
+/// 界面上就只能提示"重启电脑后修复才生效"。
+fn hot_files(id: &str) -> &'static [&'static str] {
+    match id {
+        "vc2005_x86" | "vc2005_x64" => &["msvcr80.dll", "msvcp80.dll"],
+        "vc2008_x86" | "vc2008_x64" => &["msvcr90.dll", "msvcp90.dll", "msvcm90.dll"],
+        "vc2010_x86" | "vc2010_x64" => &["msvcr100.dll", "msvcp100.dll"],
+        "vc2012_x86" | "vc2012_x64" => &["msvcr110.dll", "msvcp110.dll"],
+        "vc2013_x86" | "vc2013_x64" => &["msvcr120.dll", "msvcp120.dll"],
+        "vc2022_x86" | "vc2022_x64" => &["vcruntime140.dll", "msvcp140.dll"],
+        _ => &[],
+    }
+}
+
+/// 装这一类之前，先关掉正加载它那几个文件的程序。返回被关掉的进程名。
+fn clear_holders(c: &Comp) -> Vec<String> {
+    let dir = target_dir(c.arch);
+    let paths: Vec<PathBuf> = hot_files(c.id)
+        .iter()
+        .map(|n| dir.join(n))
+        .filter(|p| p.is_file())
+        .collect();
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    kill_lockers(&paths)
+}
+
 /// 换不了又急着要的那一手：新文件先放旁边，让 Windows 下次重启时替换掉。
 /// 安装程序那句"重启后生效"就是这么来的。
 #[cfg(windows)]
@@ -487,8 +516,12 @@ fn schedule_replace_on_reboot(_from: &Path, _to: &Path) -> bool {
     false
 }
 
-/// 把一个 dll 放进系统目录：直接复制；被占用就强关占用它的进程，再复制；
-/// 还不行就安排到下次重启替换。三条都不通的报错文案里带上两个完整路径。
+/// 把一个 dll 放进系统目录。顺序：
+/// 1. 直接复制；
+/// 2. 被占用 → 强关占用它的进程 → 再复制；
+/// 3. 还写不进去 → 把旧文件改名让位，新文件放到原名上（不用重启）；
+/// 4. 最后才安排到下次重启替换。
+/// 三条都不通的报错文案里带上两个完整路径。
 fn copy_into_place(from: &Path, to: &Path) -> Result<(), String> {
     match std::fs::copy(from, to) {
         Ok(_) => Ok(()),
@@ -498,6 +531,13 @@ fn copy_into_place(from: &Path, to: &Path) -> Result<(), String> {
                 log(&format!("{} 被 {} 占用，先关掉它们", to.display(), who.join("、")));
             }
             if std::fs::copy(from, to).is_ok() {
+                return Ok(());
+            }
+            // 还有程序把 dll 映射着（关不掉，或者关掉会影响用户正在做的事）。
+            // NTFS 允许改名一个已被加载的文件：映射照旧读老文件，新加载的程序读新的。
+            // 所以换名让位就行，不需要等重启。
+            if rename_aside_and_copy(from, to) {
+                log(&format!("{} 换不了，已把旧文件改名让位，新文件直接生效（不用重启）", to.display()));
                 return Ok(());
             }
             if schedule_replace_on_reboot(from, to) {
@@ -511,6 +551,52 @@ fn copy_into_place(from: &Path, to: &Path) -> Result<(), String> {
                 to.display()
             ))
         }
+    }
+}
+
+/// 让路式替换：`msvcr71.dll` → `msvcr71.dll.old`，然后把新的写到原名上。
+/// 旧的让位副本挂着没人再映射之后会自己可用，但正在被映射时删不掉，
+/// 那就登记"下次重启时删掉"，不留垃圾在系统目录里。
+fn rename_aside_and_copy(from: &Path, to: &Path) -> bool {
+    let Some(name) = to.file_name() else {
+        return false;
+    };
+    let mut aside_name = name.to_os_string();
+    aside_name.push(".old");
+    let aside = to.with_file_name(aside_name);
+
+    // 上一轮留下的 .old 还在（还没重启过）：先清掉，不然改名会失败
+    let _ = std::fs::remove_file(&aside);
+    let _ = schedule_delete_on_reboot(&aside);
+
+    if std::fs::rename(to, &aside).is_err() {
+        return false;
+    }
+    match std::fs::copy(from, to) {
+        Ok(_) => true,
+        Err(_) => {
+            // 放不进去就把旧的改回来，别把系统目录弄成"文件不见了"
+            let _ = std::fs::rename(&aside, to);
+            false
+        }
+    }
+}
+
+/// 让 Windows 下次重启时把这条路删掉（MoveFileEx 的新名字给 NULL 就是"删"）。
+fn schedule_delete_on_reboot(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
+        let old: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        return unsafe {
+            MoveFileExW(old.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) != 0
+        };
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
     }
 }
 
@@ -875,6 +961,10 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
             }
             let msi = stage.join(c.files[0]);
             let mut msi_log = stage.join("install.log");
+            let killed = clear_holders(c);
+            if !killed.is_empty() {
+                log(&format!("{} 装之前先让路：关掉正加载它的 {}", c.id, killed.join("、")));
+            }
             let mut code = msiexec(&msi, "/i", &[], &msi_log)?;
 
             // 1612 = 记录还在、缓存包/安装源没了；1610 = 记录坏了；1728 = 包里的
@@ -893,13 +983,13 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                 return Err(format!("msiexec 返回 {code}{}", hint(code)));
             }
             // 成功也分几种：0 是真装上了；1638 是"这台机器上已经有一套，这次没动"；
-            // 3010 / 1641 是"装上了但要重启一次才生效"，界面得说一声
+            // 3010 / 1641 是"装上了但要重启才落位"，界面得说一声
             if code != 0 {
                 log(&format!(
                     "msiexec 返回 {code}：{}",
                     match code {
                         1638 => "这台机器上已经有这套运行库的另一个版本，这次没动它",
-                        3010 | 1641 => "装上了，但系统要求重启一次才生效",
+                        3010 | 1641 => "装上了，但系统要求重启之后才生效",
                         _ => "按成功处理",
                     }
                 ));
@@ -925,7 +1015,7 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                             "补丁返回 {patch_code}：已经打过，或被更高版本替代，跳过"
                         )),
                         3010 | 1641 => {
-                            log("补丁装上了，但要求重启一次才生效");
+                            log("补丁装上了，但要求重启之后才生效");
                             REBOOT_NEEDED.store(true, Ordering::SeqCst);
                         }
                         _ => return Err(format!("补丁返回 {patch_code}{}", hint(patch_code))),
@@ -942,6 +1032,10 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                     "安装器文件缺失（多半被杀毒软件删了）：{}",
                     file.display()
                 ));
+            }
+            let killed = clear_holders(c);
+            if !killed.is_empty() {
+                log(&format!("{} 装之前先让路：关掉正加载它的 {}", c.id, killed.join("、")));
             }
             let st = Command::new(&file)
                 .args(c.args)
