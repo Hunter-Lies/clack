@@ -836,7 +836,7 @@ fn msi_retry_with_source(c: &Comp, msi: &Path, stage: &Path, first_log: &Path, c
     let retry_code = msiexec(
         msi.as_os_str(),
         "/f",
-        &["REINSTALL=ALL", "REINSTALLMODE=vomus"],
+        &["REINSTALL=ALL", "REINSTALLMODE=vomus", "USING_EXUIH_SILENT=1"],
         &retry_log,
     )?;
     if code_ok(Some(retry_code)) {
@@ -1172,11 +1172,13 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
             }
             let msi = stage.join(c.files[0]);
             let mut msi_log = stage.join("install.log");
-            let killed = clear_holders(c);
-            if !killed.is_empty() {
-                log(&format!("{} 装之前先让路：关掉正加载它的 {}", c.id, killed.join("、")));
-            }
-            let mut code = msiexec(msi.as_os_str(), "/i", &[], &msi_log)?;
+            // USING_EXUIH_SILENT=1 是官方自解压包跑 MSI 时会设的属性。VC++ 2008 那份
+            // vc_red.msi 里有个守卫动作，条件是
+            //   NOT( (USING_EXUIH = 1 OR USING_EXUIH_SILENT = 1 OR ProductState >= 1) )
+            // 命中就弹"请运行 Setup.exe"然后 1603 —— 干净机器上（这套运行库还没装过、
+            // ProductState 为 0）必然命中。别的几代不认这个属性，给了也不碍事。
+            const SILENT_PROPS: &[&str] = &["USING_EXUIH_SILENT=1"];
+            let mut code = msiexec(msi.as_os_str(), "/i", SILENT_PROPS, &msi_log)?;
 
             // 1612 = 记录还在、缓存包/安装源没了；1610 = 记录坏了；1728 = 包里的
             // 某个文件找不到（同样是源那一侧的问题）。都走"补源 + 从包本身强制重装"。
@@ -1207,7 +1209,7 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                 code = msiexec(
                     msi.as_os_str(),
                     "/f",
-                    &["REINSTALL=ALL", "REINSTALLMODE=vomus"],
+                    &["REINSTALL=ALL", "REINSTALLMODE=vomus", "USING_EXUIH_SILENT=1"],
                     &msi_log,
                 )?;
                 if code_ok(Some(code)) {
@@ -1291,10 +1293,6 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                     "安装器文件缺失（多半被杀毒软件删了）：{}",
                     file.display()
                 ));
-            }
-            let killed = clear_holders(c);
-            if !killed.is_empty() {
-                log(&format!("{} 装之前先让路：关掉正加载它的 {}", c.id, killed.join("、")));
             }
             let st = Command::new(&file)
                 .args(c.args)

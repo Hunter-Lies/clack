@@ -14,7 +14,7 @@ import {
   scan,
 } from "./lib/api";
 
-const VERSION = "v1.1.5";
+const VERSION = "v1.1.6";
 const STEP_MS = 620;
 
 // 浏览器里单独调 UI（pnpm dev）时用的占位数据。跑在 Tauri 里会被 scan() 的结果替掉。

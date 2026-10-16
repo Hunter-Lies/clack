@@ -60,10 +60,13 @@ $items = @(
     @{ Dir='06_VC2008';   Arch='x64'; Src="$Dl\vcredist2008_x64.exe"; Extract=@('vc_red.msi','vc_red.cab'); Name='Microsoft Visual C++ 2008 SP1 (x64)'; Ver='9.0.30729.6161'; Kind='MSI'; Silent='msiexec /i vc_red.msi /qn /norestart'; OS='XP x64+' }
     @{ Dir='07_VC2010';   Arch='x86'; Src="$Dl\vcredist2010_x86.exe"; Extract=@('vc_red.msi','vc_red.cab','msp_kb2565063.msp'); Name='Microsoft Visual C++ 2010 SP1'; Ver='10.0.40219.473'; Kind='MSI'; Silent='msiexec /i vc_red.msi /qn，再打 msp_kb2565063.msp'; OS='XP+' }
     @{ Dir='07_VC2010';   Arch='x64'; Src="$Dl\vcredist2010_x64.exe"; Extract=@('vc_red.msi','vc_red.cab','msp_kb2565063.msp'); Name='Microsoft Visual C++ 2010 SP1 (x64)'; Ver='10.0.40219.473'; Kind='MSI'; Silent='msiexec /i vc_red.msi /qn，再打 msp_kb2565063.msp'; OS='XP x64+' }
-    @{ Dir='08_VC2012';   Arch='x86'; Src="$Legacy\vc_redist2012_x86.exe";  Name='Microsoft Visual C++ 2012 U4'; Ver='11.0.61030';    Kind='EXE'; Silent='/install /quiet /norestart'; OS='Vista+' }
-    @{ Dir='08_VC2012';   Arch='x64'; Src="$Legacy\vc_redist2012_x64.exe";  Name='Microsoft Visual C++ 2012 U4 (x64)'; Ver='11.0.61030'; Kind='EXE'; Silent='/install /quiet /norestart'; OS='Vista x64+' }
-    @{ Dir='09_VC2013';   Arch='x86'; Src="$Legacy\vc_redist2013_x86.exe";  Name='Microsoft Visual C++ 2013'; Ver='12.0.40664';       Kind='EXE'; Silent='/install /quiet /norestart'; OS='Vista+' }
-    @{ Dir='09_VC2013';   Arch='x64'; Src="$Legacy\vc_redist2013_x64.exe";  Name='Microsoft Visual C++ 2013 (x64)'; Ver='12.0.40664'; Kind='EXE'; Silent='/install /quiet /norestart'; OS='Vista x64+' }
+    # 2012/2013 必须用**完整离线包**（$Dl 里那两份 6~7 MB 的），不能用联网版（400 多 KB）。
+    # 联网版自己没有内嵌容器，干净机器上它会试图"提示你提供源"，静默模式下直接 1603；
+    # 之所以以前没暴出来，是因为那时机器上 `C:\ProgramData\Package Cache` 里早就有装过一次的容器了。
+    @{ Dir='08_VC2012';   Arch='x86'; Src="$Dl\vc_redist2012_x86.exe";      Name='Microsoft Visual C++ 2012 U4'; Ver='11.0.61030';    Kind='EXE'; Silent='/install /quiet /norestart'; OS='Vista+' }
+    @{ Dir='08_VC2012';   Arch='x64'; Src="$Dl\vc_redist2012_x64.exe";      Name='Microsoft Visual C++ 2012 U4 (x64)'; Ver='11.0.61030'; Kind='EXE'; Silent='/install /quiet /norestart'; OS='Vista x64+' }
+    @{ Dir='09_VC2013';   Arch='x86'; Src="$Dl\vc_redist2013_x86.exe";      Name='Microsoft Visual C++ 2013'; Ver='12.0.40664';       Kind='EXE'; Silent='/install /quiet /norestart'; OS='Vista+' }
+    @{ Dir='09_VC2013';   Arch='x64'; Src="$Dl\vc_redist2013_x64.exe";      Name='Microsoft Visual C++ 2013 (x64)'; Ver='12.0.40664'; Kind='EXE'; Silent='/install /quiet /norestart'; OS='Vista x64+' }
     @{ Dir='10_VC2015-2022_14.51'; Arch='x86'; Src="$Dl\vc_redist_vs18_x86.exe"; As='vc_redist.x86.exe'; Name='Microsoft Visual C++ 2015-2022（最新）'; Ver='14.51.36247'; Kind='EXE'; Silent='/install /quiet /norestart'; OS='Win10+' }
     @{ Dir='10_VC2015-2022_14.51'; Arch='x64'; Src="$Dl\vc_redist_vs18_x64.exe"; As='vc_redist.x64.exe'; Name='Microsoft Visual C++ 2015-2022（最新, x64）'; Ver='14.51.36247'; Kind='EXE'; Silent='/install /quiet /norestart'; OS='Win10 x64+' }
     # 不含 VSTOR（VS 2010 Tools for Office）：那是老 Office 的 VSTO 插件运行时，与游戏无关；
