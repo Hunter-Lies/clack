@@ -752,10 +752,11 @@ fn hint_exe(code: i32) -> &'static str {
 
 /// 跑一次 msiexec。verb 是 `/i`（装）、`/f`（修复）或 `/p`（打补丁），
 /// 日志固定写到 log_path。返回 msiexec 的退出码；进程都起不来才算 Err。
-fn msiexec(pkg: &Path, verb: &str, props: &[&str], log_path: &Path) -> Result<i32, String> {
+/// `target` 可以是一个包（`.msi` / `.msp`），也可以是产品码（`/X` 卸载时用）。
+fn msiexec(target: &std::ffi::OsStr, verb: &str, props: &[&str], log_path: &Path) -> Result<i32, String> {
     let st = Command::new("msiexec.exe")
         .arg(verb)
-        .arg(pkg)
+        .arg(target)
         .args(["/qn", "/norestart"])
         .args(props)
         .arg("/l*v")
@@ -807,7 +808,7 @@ fn msi_retry_with_source(c: &Comp, msi: &Path, stage: &Path, first_log: &Path, c
             match restore_source_dir(&dir, stage) {
                 Ok(()) => {
                     log(&format!("已把安装包放回 {}", dir.display()));
-                    let rc = msiexec(msi, "/i", &[], &stage.join("install-retry.log"))?;
+                    let rc = msiexec(msi.as_os_str(), "/i", &[], &stage.join("install-retry.log"))?;
                     if code_ok(Some(rc)) {
                         log("把包放回原来那个源目录之后装上了");
                         return Ok(rc);
@@ -833,7 +834,7 @@ fn msi_retry_with_source(c: &Comp, msi: &Path, stage: &Path, first_log: &Path, c
     // REINSTALLMODE=vomus 覆盖全部文件，REINSTALL=ALL 覆盖全部组件
     let retry_log = stage.join("install-retry2.log");
     let retry_code = msiexec(
-        msi,
+        msi.as_os_str(),
         "/f",
         &["REINSTALL=ALL", "REINSTALLMODE=vomus"],
         &retry_log,
@@ -847,6 +848,37 @@ fn msi_retry_with_source(c: &Comp, msi: &Path, stage: &Path, first_log: &Path, c
         ));
     }
     Ok(retry_code)
+}
+
+/// 最后一条路：把这套运行库的旧记录摘掉，再从我们的包全新装一遍。
+///
+/// 学的是那些老合集的套路（`MsiExec /qn /X{产品码}` 然后重装）：全新安装不需要去翻旧安装源，
+/// 1612 那条死路自然就绕开了。代价是这一代运行库会先被摘掉，所以顺序排在最后——
+/// 前面那些"不动现状"的补救（补源、放回原目录、强制重装）都失败才轮得到它。
+fn remove_then_install(c: &Comp, msi: &Path, stage: &Path, first_code: i32) -> Result<i32, String> {
+    let remove_log = stage.join("remove.log");
+    let rc = msiexec(std::ffi::OsStr::new(c.pcode), "/X", &[], &remove_log)?;
+    log(&format!(
+        "摘掉 {} 的旧记录：msiexec /X 返回 {rc}（日志 {}）",
+        c.id,
+        remove_log.display()
+    ));
+    // 0 = 摘掉了；1605 = 本来就没装；3010 / 1641 = 摘掉了但要求重启。这几种都可以接着装
+    if !matches!(rc, 0 | 1605 | 3010 | 1641) {
+        log("旧记录没摘掉，这条路放弃");
+        return Ok(first_code);
+    }
+    let install_log = stage.join("install-after-remove.log");
+    let after = msiexec(msi.as_os_str(), "/i", &[], &install_log)?;
+    if code_ok(Some(after)) {
+        log(&format!("摘掉旧记录之后装上了（返回 {after}）"));
+    } else {
+        log(&format!(
+            "摘掉旧记录之后再装还是 {after}，日志：{}。这一代现在是被摘掉的状态，让用户重启之后再跑一次",
+            install_log.display()
+        ));
+    }
+    Ok(after)
 }
 
 /// 从来源记录 `n;4;C:\dir\` 里取出那个目录。不是本地盘路径（UNC、URL）就不碰。
@@ -1144,13 +1176,46 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
             if !killed.is_empty() {
                 log(&format!("{} 装之前先让路：关掉正加载它的 {}", c.id, killed.join("、")));
             }
-            let mut code = msiexec(&msi, "/i", &[], &msi_log)?;
+            let mut code = msiexec(msi.as_os_str(), "/i", &[], &msi_log)?;
 
             // 1612 = 记录还在、缓存包/安装源没了；1610 = 记录坏了；1728 = 包里的
             // 某个文件找不到（同样是源那一侧的问题）。都走"补源 + 从包本身强制重装"。
             if !code_ok(Some(code)) && matches!(code, 1612 | 1610 | 1728) {
                 msi_log = stage.join("install-retry.log");
                 code = msi_retry_with_source(c, &msi, &stage, &stage.join("install.log"), code)?;
+            }
+
+            // 最后一条路，学那些老合集的：`MsiExec /qn /X{产品码}` 把这套运行库的旧记录摘掉，
+            // 再从我们手上的包做一次全新安装——全新安装不会去翻旧安装源，1612 自然没有了。
+            // 放在最后是因为它会把这套运行库先从机器上摘掉：前面那些不破坏现状的补救都试过才轮得到它。
+            if !code_ok(Some(code)) && matches!(code, 1612 | 1610) && !c.pcode.is_empty() {
+                code = remove_then_install(c, &msi, &stage, code)?;
+                msi_log = stage.join("install-after-remove.log");
+            }
+
+            // 1603 是 MSI 的"通用致命错误"：文件写不进去、组件注册不上、被占用……死因只在那份
+            // install.log 里。这里按顺序补两枪：
+            //   1) 强制重装：REINSTALLMODE=vomus 会把所有文件重写一遍，绕过版本和哈希判断
+            //      （"某个文件写不进去"这一类最常见的就是它治好的）；
+            //   2) 还不行就摘掉旧记录再来一次。
+            if matches!(code, 1603) {
+                let killed = clear_holders(c);
+                if !killed.is_empty() {
+                    log(&format!("1603：先关掉占用它的 {}，再强制重写一遍所有文件", killed.join("、")));
+                }
+                msi_log = stage.join("install-forced.log");
+                code = msiexec(
+                    msi.as_os_str(),
+                    "/f",
+                    &["REINSTALL=ALL", "REINSTALLMODE=vomus"],
+                    &msi_log,
+                )?;
+                if code_ok(Some(code)) {
+                    log("1603：强制重装之后装上了");
+                } else if !c.pcode.is_empty() {
+                    code = remove_then_install(c, &msi, &stage, code)?;
+                    msi_log = stage.join("install-after-remove.log");
+                }
             }
 
             if !code_ok(Some(code)) {
@@ -1174,7 +1239,7 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                     ));
                 }
                 msi_log = stage.join("install-after-kill.log");
-                code = msiexec(&msi, "/i", &[], &msi_log)?;
+                code = msiexec(msi.as_os_str(), "/i", &[], &msi_log)?;
             }
             // 成功也分几种：0 是真装上了；1638 是"这台机器上已经有一套，这次没动"；
             // 3010 / 1641 是"装上了但要重启才落位"，界面得说一声
@@ -1202,7 +1267,7 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                         continue;
                     }
                     log(&format!("打补丁 {}", p.display()));
-                    let patch_code = msiexec(&p, "/p", &[], &stage.join("patch.log"))?;
+                    let patch_code = msiexec(p.as_os_str(), "/p", &[], &stage.join("patch.log"))?;
                     match patch_code {
                         0 => {}
                         1638 | 1642 => log(&format!(
@@ -1239,28 +1304,34 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
             // 0x80070666 其实就是 1638（机器上已经装了更高版本），不归一化就会把
             // "本来就装好了"报成红。
             let raw = st.code().unwrap_or(-1);
-            let code = if (raw as u32) >= 0x8007_0000 { raw & 0xFFFF } else { raw };
+            let mut code = if (raw as u32) >= 0x8007_0000 { raw & 0xFFFF } else { raw };
+            // 1603：vc_redist 是 burn 打包的，支持 `/repair`。先请占用让路，再让它自己修一遍
+            if code == 1603 {
+                let killed = clear_holders(c);
+                if !killed.is_empty() {
+                    log(&format!("1603：先关掉 {} 再让安装器修一遍", killed.join("、")));
+                }
+                let mut repair: Vec<&str> = c.args.to_vec();
+                if let Some(first) = repair.first_mut() {
+                    *first = "/repair";
+                }
+                if let Ok(st) = Command::new(&file).args(&repair).status() {
+                    let raw = st.code().unwrap_or(-1);
+                    code = if (raw as u32) >= 0x8007_0000 { raw & 0xFFFF } else { raw };
+                    log(&format!("1603：/repair 之后返回 {code}"));
+                }
+            }
             // 和 MSI 那边一个道理：能当场落位就别让用户重启
-            let code = if code == 3010 && reboot_is_ours() {
+            if code == 3010 && reboot_is_ours() {
                 let killed = clear_holders(c);
                 if !killed.is_empty() {
                     log(&format!("{} 要把替换留到重启，先关掉 {} 再装一次", c.id, killed.join("、")));
                 }
-                let again = Command::new(&file).args(c.args).status();
-                match again {
-                    Ok(st) => {
-                        let raw = st.code().unwrap_or(-1);
-                        if (raw as u32) >= 0x8007_0000 {
-                            raw & 0xFFFF
-                        } else {
-                            raw
-                        }
-                    }
-                    Err(_) => code,
+                if let Ok(st) = Command::new(&file).args(c.args).status() {
+                    let raw = st.code().unwrap_or(-1);
+                    code = if (raw as u32) >= 0x8007_0000 { raw & 0xFFFF } else { raw };
                 }
-            } else {
-                code
-            };
+            }
             if code_ok(Some(code)) {
                 if matches!(code, 1638) {
                     log(&format!("{}：这台机器上已经装了更新或同版本，这次没动它", c.id));
