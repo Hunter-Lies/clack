@@ -69,4 +69,15 @@ mod tests {
             "打开 SeShutdownPrivilege 失败，立刻重启那一步会失败"
         );
     }
+
+    /// 读"待重启文件操作"这一步：MSI 回 3010 时要靠它判断是我们造成的还是机器本来就有的。
+    /// 不断言数量（每台机器不一样），断言读出来的项都是像样的路径。
+    #[test]
+    fn pending_file_ops_reads() {
+        let ops = crate::pending_file_ops();
+        println!("待重启文件操作 {} 项：{:?}", ops.len(), ops);
+        for op in ops {
+            assert!(op.len() > 4, "读出来的项不像路径：{op}");
+        }
+    }
 }

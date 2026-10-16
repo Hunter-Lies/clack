@@ -21,6 +21,10 @@ static REEXTRACTED: AtomicBool = AtomicBool::new(false);
 /// 有的话，界面上要提示用户重启电脑之后才生效。
 static REBOOT_NEEDED: AtomicBool = AtomicBool::new(false);
 
+/// 这一轮开始之前，系统里已经挂着的"待重启文件操作"。
+/// 用来区分安装器回的 3010 到底是不是我们造成的（见 reboot_is_ours）。
+static PENDING_BEFORE: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
 /// 这次运行是不是第一个实例。用户双击两遍时，第二个实例不负责清 payload
 /// ——它要是清了，正在装的那个实例会当场缺文件。
 static FIRST_INSTANCE: AtomicBool = AtomicBool::new(true);
@@ -391,9 +395,13 @@ fn file_version(_path: &Path) -> Option<[u32; 4]> {
     None
 }
 
-/// 谁正拿着这个文件。用 Windows 自己的重启管理器问——安装程序那句
-/// "关掉正在使用本程序的应用"就是这套 API，比自己枚举句柄稳。
-/// 需要管理员权限（我们启动时就要了）。
+/// 请占用这些文件的程序退出，并且**等它们真的退出**。
+///
+/// 这里踩过一次：只调 `RmShutdown` 就往下走，而它只是"发出关闭请求"、不等进程结束。
+/// 安装器一抬手就看见文件还在被用，于是把替换推给重启（3010），界面就老是提示
+/// "重启电脑后修复才生效"。所以现在是：请求 → 等最多 8 秒 → 还赖着的直接结束它 → 再等 3 秒。
+/// 用 Windows 自己的重启管理器拿名单（安装程序那句"关掉正在使用本程序的应用"就是这套 API），
+/// 比自己枚举句柄稳。需要管理员权限（我们启动时就要了）。
 #[cfg(windows)]
 fn kill_lockers(paths: &[PathBuf]) -> Vec<String> {
     use std::os::windows::ffi::OsStrExt;
@@ -403,6 +411,7 @@ fn kill_lockers(paths: &[PathBuf]) -> Vec<String> {
     };
 
     let mut names: Vec<String> = Vec::new();
+    let mut pids: Vec<u32> = Vec::new();
     let wide: Vec<Vec<u16>> = paths
         .iter()
         .map(|p| p.as_os_str().encode_wide().chain(std::iter::once(0)).collect())
@@ -444,6 +453,7 @@ fn kill_lockers(paths: &[PathBuf]) -> Vec<String> {
                         if !name.is_empty() {
                             names.push(name);
                         }
+                        pids.push(info.Process.dwProcessId);
                     }
                     // 强关：这些进程正拿着我们要写的 dll，不结束没法替换。
                     // 用户通常还开着游戏，这一步就是把游戏关掉。
@@ -456,7 +466,86 @@ fn kill_lockers(paths: &[PathBuf]) -> Vec<String> {
 
     names.sort();
     names.dedup();
+    if pids.is_empty() {
+        return names;
+    }
+
+    // 等它们真的走掉再返回——不然上面的请求等于白发
+    let waited = wait_gone(&pids, 8_000);
+    if waited > 0 {
+        log(&format!("等了 {waited} 毫秒，{} 个进程还没退出，直接结束它们", pids.len()));
+        hard_kill(&pids);
+    }
     names
+}
+
+/// 等这些进程退出，返回实际等待的毫秒数（0 = 等之前就都没了）。
+#[cfg(windows)]
+fn wait_gone(pids: &[u32], max_ms: u64) -> u64 {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcessId, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE,
+    };
+
+    let me = unsafe { GetCurrentProcessId() };
+    let step = 200u64;
+    let mut waited = 0u64;
+    while waited < max_ms {
+        let mut alive = 0;
+        for pid in pids {
+            // 自己也在名单里的话别等自己（理论上不会），pid 0/4 是空闲和 System
+            if *pid == 0 || *pid == 4 || *pid == me {
+                continue;
+            }
+            unsafe {
+                let h = OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, *pid);
+                if h.is_null() {
+                    continue; // 打不开：多半已经没了
+                }
+                let exited = WaitForSingleObject(h, 0) == 0;
+                CloseHandle(h);
+                if !exited {
+                    alive += 1;
+                }
+            }
+        }
+        if alive == 0 {
+            return waited;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(step));
+        waited += step;
+    }
+    waited
+}
+
+/// 宽限期过了还活着的那几个，直接结束。
+#[cfg(windows)]
+fn hard_kill(pids: &[u32]) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcessId, OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        PROCESS_TERMINATE,
+    };
+
+    let me = unsafe { GetCurrentProcessId() };
+    for pid in pids {
+        if *pid == 0 || *pid == 4 || *pid == me {
+            continue;
+        }
+        unsafe {
+            let h = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, *pid);
+            if h.is_null() {
+                continue;
+            }
+            if WaitForSingleObject(h, 0) != 0 {
+                log(&format!("{pid} 没自己退，直接结束"));
+                TerminateProcess(h, 1);
+                WaitForSingleObject(h, 3_000);
+            }
+            CloseHandle(h);
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -887,6 +976,96 @@ fn add_msi_source(product: &str, source_dir: &str) -> bool {
     rc == 0
 }
 
+/// 系统里挂着的"下次重启时才做的文件操作"（MSI 和 MoveFileEx 都往这里写）。
+/// 读 `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\PendingFileRenameOperations[2]`。
+fn pending_file_ops() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Registry::{
+            RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE,
+        };
+        let mut out = Vec::new();
+        let sub: Vec<u16> = "SYSTEM\\CurrentControlSet\\Control\\Session Manager\0"
+            .encode_utf16()
+            .collect();
+        unsafe {
+            let mut key = std::ptr::null_mut();
+            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, sub.as_ptr(), 0, KEY_QUERY_VALUE, &mut key) != 0 {
+                return out;
+            }
+            for entry in ["PendingFileRenameOperations", "PendingFileRenameOperations2"] {
+                let name: Vec<u16> = entry.encode_utf16().chain(std::iter::once(0)).collect();
+                let mut len: u32 = 0;
+                // 先问长度
+                if RegQueryValueExW(
+                    key,
+                    name.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut len,
+                ) != 0
+                    || len == 0
+                {
+                    continue;
+                }
+                let mut buf = vec![0u8; len as usize];
+                if RegQueryValueExW(
+                    key,
+                    name.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    buf.as_mut_ptr(),
+                    &mut len,
+                ) != 0
+                {
+                    continue;
+                }
+                let units: Vec<u16> = buf
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+                for part in units.split(|c| *c == 0) {
+                    if !part.is_empty() {
+                        out.push(String::from_utf16_lossy(part));
+                    }
+                }
+            }
+            RegCloseKey(key);
+        }
+        out
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// 这一轮里"待重启文件操作"变了吗。没变 = 机器本来就那样。
+fn reboot_is_ours() -> bool {
+    let before = PENDING_BEFORE.get_or_init(pending_file_ops);
+    pending_file_ops() != *before
+}
+
+/// 安装器回 3010 / 1641 时，决定要不要在完成屏上提示重启。
+///
+/// 3010 有两个来源：安装器真的把替换推到了重启（这是我们的事），
+/// 和这台机器**本来就**挂着别的待重启操作（Windows 更新、游戏服务、别的安装器
+/// 都会往 `PendingFileRenameOperations` 里塞；只要它非空，后面装的 MSI 一律回 3010）。
+/// 后者提示用户没有意义，还会让人以为咔哒装坏了，所以按"本轮前后有没有变化"区分。
+fn flag_reboot(code: i32) {
+    if code == 1641 {
+        // 安装器已经把机器带进重启流程了，这个必须说
+        REBOOT_NEEDED.store(true, Ordering::SeqCst);
+        return;
+    }
+    if reboot_is_ours() {
+        REBOOT_NEEDED.store(true, Ordering::SeqCst);
+    } else {
+        log("安装器说需要重启，但那是机器上本来就挂着的待重启操作（不是这次装出来的），不提示用户");
+    }
+}
+
 fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
     let dir = root.join(c.dir);
     if !dir.is_dir() {
@@ -982,6 +1161,21 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                 }
                 return Err(format!("msiexec 返回 {code}{}", hint(code)));
             }
+            // 3010 = "装好了，但要重启才落位"。这一轮要是我们确实往"待重启操作"里加了东西，
+            // 说明安装器真把替换推给了重启（多半还有人加载着这一代的 dll）。
+            // 那就再杀一轮占用、重装一次：能当场落位就别麻烦用户重启。
+            if code == 3010 && reboot_is_ours() {
+                let killed = clear_holders(c);
+                if !killed.is_empty() {
+                    log(&format!(
+                        "{} 说要把替换留到重启，先把占用它的 {} 关掉，再装一次",
+                        c.id,
+                        killed.join("、")
+                    ));
+                }
+                msi_log = stage.join("install-after-kill.log");
+                code = msiexec(&msi, "/i", &[], &msi_log)?;
+            }
             // 成功也分几种：0 是真装上了；1638 是"这台机器上已经有一套，这次没动"；
             // 3010 / 1641 是"装上了但要重启才落位"，界面得说一声
             if code != 0 {
@@ -994,7 +1188,7 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                     }
                 ));
                 if matches!(code, 3010 | 1641) {
-                    REBOOT_NEEDED.store(true, Ordering::SeqCst);
+                    flag_reboot(code);
                 }
             }
             // 同目录里如果有 .msp 补丁就接着打上（2010 SP1 的 KB2565063 就是这样进来的）。
@@ -1016,7 +1210,7 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                         )),
                         3010 | 1641 => {
                             log("补丁装上了，但要求重启之后才生效");
-                            REBOOT_NEEDED.store(true, Ordering::SeqCst);
+                            flag_reboot(patch_code);
                         }
                         _ => return Err(format!("补丁返回 {patch_code}{}", hint(patch_code))),
                     }
@@ -1046,12 +1240,33 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
             // "本来就装好了"报成红。
             let raw = st.code().unwrap_or(-1);
             let code = if (raw as u32) >= 0x8007_0000 { raw & 0xFFFF } else { raw };
+            // 和 MSI 那边一个道理：能当场落位就别让用户重启
+            let code = if code == 3010 && reboot_is_ours() {
+                let killed = clear_holders(c);
+                if !killed.is_empty() {
+                    log(&format!("{} 要把替换留到重启，先关掉 {} 再装一次", c.id, killed.join("、")));
+                }
+                let again = Command::new(&file).args(c.args).status();
+                match again {
+                    Ok(st) => {
+                        let raw = st.code().unwrap_or(-1);
+                        if (raw as u32) >= 0x8007_0000 {
+                            raw & 0xFFFF
+                        } else {
+                            raw
+                        }
+                    }
+                    Err(_) => code,
+                }
+            } else {
+                code
+            };
             if code_ok(Some(code)) {
                 if matches!(code, 1638) {
                     log(&format!("{}：这台机器上已经装了更新或同版本，这次没动它", c.id));
                 }
                 if matches!(code, 3010 | 1641) {
-                    REBOOT_NEEDED.store(true, Ordering::SeqCst);
+                    flag_reboot(code);
                 }
                 Ok(())
             } else {
@@ -1081,6 +1296,8 @@ fn run_install_inner(app: &AppHandle, rows: Vec<String>) {
         );
         return;
     }
+    // 记下动手之前系统里已有的"待重启文件操作"：后面区分 3010 是不是我们造成的
+    PENDING_BEFORE.get_or_init(pending_file_ops);
     let Some(root) = payload_root(app) else {
         let _ = app.emit(
             "install:done",
