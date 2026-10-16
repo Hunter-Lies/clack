@@ -5,10 +5,21 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Once;
 use tauri::{AppHandle, Emitter, Manager};
 
 /// 安装进行中。这段时间不允许关窗口——半截被打断最难收拾。
 static BUSY: AtomicBool = AtomicBool::new(false);
+
+/// 正在用管理员身份重新拉起自己。这时候别清 payload——下一个进程还要用。
+static RELAUNCHING: AtomicBool = AtomicBool::new(false);
+
+/// 这一轮里是不是已经重新解包过了。一次运行最多重解一次：
+/// 59 MB 解一遍不便宜，多个组件同时缺文件时没必要每个都重解。
+static REEXTRACTED: AtomicBool = AtomicBool::new(false);
+
+/// 日志文件第一次写入前做一次准备（清空上一次运行留下的内容）
+static LOG_READY: Once = Once::new();
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -71,14 +82,17 @@ const COMPS: &[Comp] = &[
         dir: "07_VC2010/x86", files: &["vc_red.msi"], args: &[] },
     Comp { id: "vc2010_x64", group: "vc2010", name: "Visual C++ 2010 SP1 (x64)", version: "10.0.40219.473", arch: Arch::X64, kind: Kind::Msi,
         dir: "07_VC2010/x64", files: &["vc_red.msi"], args: &[] },
-    Comp { id: "vc2012_x86", group: "vc2012", name: "Visual C++ 2012 U4", version: "11.0.61135", arch: Arch::X86, kind: Kind::Exe,
-        dir: "08_VC2012/x86", files: &["vc_redist.x86.exe"], args: &["/install", "/quiet", "/norestart"] },
-    Comp { id: "vc2012_x64", group: "vc2012", name: "Visual C++ 2012 U4 (x64)", version: "11.0.61135", arch: Arch::X64, kind: Kind::Exe,
-        dir: "08_VC2012/x64", files: &["vc_redist.x64.exe"], args: &["/install", "/quiet", "/norestart"] },
+    // 注意文件名：2012/2013 这两代官方包就叫 vc_redist2012_x86.exe 这种，
+    // 不是 2015-2022 那份的 vc_redist.x86.exe。写错的表现是
+    // "启动安装器失败：系统找不到指定的文件 (os error 2)"——文件其实在，只是名字对不上。
+    Comp { id: "vc2012_x86", group: "vc2012", name: "Visual C++ 2012 U4", version: "11.0.61030", arch: Arch::X86, kind: Kind::Exe,
+        dir: "08_VC2012/x86", files: &["vc_redist2012_x86.exe"], args: &["/install", "/quiet", "/norestart"] },
+    Comp { id: "vc2012_x64", group: "vc2012", name: "Visual C++ 2012 U4 (x64)", version: "11.0.61030", arch: Arch::X64, kind: Kind::Exe,
+        dir: "08_VC2012/x64", files: &["vc_redist2012_x64.exe"], args: &["/install", "/quiet", "/norestart"] },
     Comp { id: "vc2013_x86", group: "vc2013", name: "Visual C++ 2013", version: "12.0.40664", arch: Arch::X86, kind: Kind::Exe,
-        dir: "09_VC2013/x86", files: &["vc_redist.x86.exe"], args: &["/install", "/quiet", "/norestart"] },
+        dir: "09_VC2013/x86", files: &["vc_redist2013_x86.exe"], args: &["/install", "/quiet", "/norestart"] },
     Comp { id: "vc2013_x64", group: "vc2013", name: "Visual C++ 2013 (x64)", version: "12.0.40664", arch: Arch::X64, kind: Kind::Exe,
-        dir: "09_VC2013/x64", files: &["vc_redist.x64.exe"], args: &["/install", "/quiet", "/norestart"] },
+        dir: "09_VC2013/x64", files: &["vc_redist2013_x64.exe"], args: &["/install", "/quiet", "/norestart"] },
     Comp { id: "vc2022_x86", group: "vc2022", name: "Visual C++ 2015-2022", version: "14.51.36247", arch: Arch::X86, kind: Kind::Exe,
         dir: "10_VC2015-2022_14.51/x86", files: &["vc_redist.x86.exe"], args: &["/install", "/quiet", "/norestart"] },
     Comp { id: "vc2022_x64", group: "vc2022", name: "Visual C++ 2015-2022 (x64)", version: "14.51.36247", arch: Arch::X64, kind: Kind::Exe,
@@ -128,25 +142,96 @@ fn log(line: &str) {
     // 别用 println!：正式版没有控制台，stdout 是空句柄，写失败会 panic，
     // 而 release 配了 panic = "abort"，一个日志就能把整个程序带走。
     let _ = writeln!(std::io::stdout(), "[click] {line}");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(std::env::temp_dir().join("Click.log"))
-    {
+    let path = std::env::temp_dir().join("Click.log");
+    LOG_READY.call_once(|| {
+        // 一次运行只留一份日志：没管理员权限时启动的那个进程先把它清空，
+        // 提权起来的那个（带 --elevated）接着往后写。
+        // 一直追加的话文件会越滚越大，用户真出事发过来的那份还得自己找最后一段。
+        if !std::env::args().any(|a| a == "--elevated") {
+            let _ = std::fs::write(&path, b"");
+        }
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "[click] {line}");
     }
 }
 
-/// 把内嵌的 payload 解到 %ProgramData%\Click\payload\<版本>\，同一版本只解一次。
-/// 放 ProgramData 而不是临时目录：它是持久的，重复启动不用再解一遍。
-#[cfg(not(debug_assertions))]
-fn ensure_payload() -> Option<PathBuf> {
-    let base = std::env::var_os("ProgramData")
+/// 程序自己的工作目录。放在 ProgramData 而不是 %TEMP%：
+/// 这里是纯 ASCII 路径（msiexec 吃不消中文路径），普通权限也读得到，
+/// 用户/客服不用提权就能把日志发出来。退出时会清掉解出来的东西。
+fn click_dir() -> PathBuf {
+    std::env::var_os("ProgramData")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("C:\\ProgramData"))
         .join("Click")
-        .join("payload");
-    let dir = base.join(env!("CARGO_PKG_VERSION"));
+}
+
+/// 解出来的运行库放 %ProgramData%\Click\payload\<版本>\，同一次运行里只解一遍。
+#[cfg(not(debug_assertions))]
+fn payload_dir() -> PathBuf {
+    click_dir()
+        .join("payload")
+        .join(env!("CARGO_PKG_VERSION"))
+}
+
+/// 退出前收拾现场：解出来的 payload（60 多 MB）和拷进各组件目录的临时安装包
+/// （MSI / CAB / MSP，加起来还有几十 MB）都只为这一次运行存在。
+/// 各组件目录里的 install.log 留着——那是 msiexec 的日志，出问题要看的就是它。
+/// 下次启动重新解一遍，一两秒的事。
+/// 强杀进程（任务管理器）时来不及跑，那种情况会剩下目录：再正常开关一次就能清掉。
+fn cleanup() {
+    if RELAUNCHING.load(Ordering::SeqCst) || BUSY.load(Ordering::SeqCst) {
+        return;
+    }
+    let base = click_dir();
+
+    let payload = base.join("payload");
+    if payload.is_dir() {
+        match std::fs::remove_dir_all(&payload) {
+            Ok(()) => log(&format!("已清理 {}", payload.display())),
+            Err(e) => log(&format!("清理 {} 失败：{e}", payload.display())),
+        }
+    }
+
+    let Ok(entries) = std::fs::read_dir(&base) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let Ok(files) = std::fs::read_dir(e.path()) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let p = f.path();
+            let ext = p
+                .extension()
+                .map(|x| x.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if matches!(ext.as_str(), "msi" | "cab" | "msp") {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+}
+
+/// payload 里某个文件被删了（杀毒软件干的、解包被中断、用户清过目录）：
+/// 把解出来的那份整个撤掉重解一遍。返回 true = 重解成功，可以重试。
+#[cfg(not(debug_assertions))]
+fn refresh_payload() -> bool {
+    let dir = payload_dir();
+    let _ = std::fs::remove_file(dir.join(".ok"));
+    let _ = std::fs::remove_dir_all(&dir);
+    ensure_payload().is_some()
+}
+
+/// 开发时 payload 就是源码目录里的那份，没什么可重解的
+#[cfg(debug_assertions)]
+fn refresh_payload() -> bool {
+    false
+}
+
+#[cfg(not(debug_assertions))]
+fn ensure_payload() -> Option<PathBuf> {
+    let dir = payload_dir();
     if dir.join(".ok").is_file() {
         return Some(dir);
     }
@@ -230,6 +315,12 @@ fn code_ok(code: Option<i32>) -> bool {
 
 fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
     let dir = root.join(c.dir);
+    if !dir.is_dir() {
+        return Err(format!(
+            "组件目录不存在（payload 可能被清理或被杀毒软件删了）：{}",
+            dir.display()
+        ));
+    }
     match c.kind {
         Kind::Dll => {
             let dest = target_dir(c.arch);
@@ -249,16 +340,19 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
             Ok(())
         }
         Kind::Msi => {
+            let pkg = dir.join(c.files[0]);
+            if !pkg.is_file() {
+                return Err(format!(
+                    "安装包缺失（多半被杀毒软件删了）：{}",
+                    pkg.display()
+                ));
+            }
             // MSI 不能直接从非 ASCII 路径装：Windows Installer 服务是独立进程，
             // 路径在里面要过一遍 ANSI，中文路径到那儿就废了，msiexec 只会回 1619（包打不开）。
             // 所以先把包和它的 cab / msp 一起拷到一个纯 ASCII 的临时目录，再从那里装。
             // 放 ProgramData 而不是 Windows\Temp：同样是纯 ASCII 路径，
             // 但普通权限读得到，出问题用户/客服不用提权就能把日志发出来
-            let stage = std::env::var_os("ProgramData")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("C:\\ProgramData"))
-                .join("Click")
-                .join(c.id);
+            let stage = click_dir().join(c.id);
             std::fs::create_dir_all(&stage).map_err(|e| format!("建临时目录失败：{e}"))?;
             for e in std::fs::read_dir(&dir).map_err(|e| format!("读组件目录失败：{e}"))?.flatten() {
                 let p = e.path();
@@ -306,10 +400,17 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
         }
         Kind::Exe => {
             let file = dir.join(c.files[0]);
+            // 文件不见了就别让 Command 去猜：用户看到的"系统找不到指定的文件"就是这么来的
+            if !file.is_file() {
+                return Err(format!(
+                    "安装器文件缺失（多半被杀毒软件删了）：{}",
+                    file.display()
+                ));
+            }
             let st = Command::new(&file)
                 .args(c.args)
                 .status()
-                .map_err(|e| format!("启动安装器失败：{e}"))?;
+                .map_err(|e| format!("启动安装器失败：{e}（{}）", file.display()))?;
             if code_ok(st.code()) {
                 Ok(())
             } else {
@@ -355,6 +456,15 @@ fn run_install_inner(app: &AppHandle, rows: Vec<String>) {
                 message: None,
             },
         );
+        // 要用的文件不在就先自愈一次（杀毒删文件、解包被打断都见过），重新解包再跑。
+        // 一轮里只重解一次：多个组件同时缺的时候，重解一次就该全好了。
+        if !root.join(c.dir).join(c.files[0]).is_file()
+            && !REEXTRACTED.swap(true, Ordering::SeqCst)
+            && refresh_payload()
+        {
+            log(&format!("{} 的文件缺失，已重新解包 payload", c.id));
+        }
+
         match run_one(&root, c) {
             Ok(()) => {
                 log(&format!("完成 {}", c.id));
@@ -434,6 +544,8 @@ fn relaunch_elevated() -> bool {
     let file = wide(&exe.to_string_lossy());
     let params = wide("--elevated");
 
+    // 拉起新进程后本进程就要退场了，这时候不能清目录：新进程还要用
+    RELAUNCHING.store(true, Ordering::SeqCst);
     unsafe {
         let r = ShellExecuteW(
             std::ptr::null_mut(),
@@ -485,6 +597,7 @@ fn is_elevated() -> bool {
 /// 那就直接结束自己。安装器是独立进程，不受影响。
 #[tauri::command]
 fn quit() {
+    cleanup();
     std::process::exit(0);
 }
 
@@ -564,6 +677,16 @@ pub fn run() {
             open_url,
             quit
         ])
-        .run(tauri::generate_context!())
-        .expect("启动失败");
+        .build(tauri::generate_context!())
+        .expect("启动失败")
+        .run(|_app, event| {
+            // 正常关窗口也走到这儿——把解出来的东西收走
+            if let tauri::RunEvent::Exit = event {
+                cleanup();
+            }
+        });
 }
+
+// 组件表 vs payload 的一致性自测（cargo test）
+#[cfg(test)]
+mod payload_test;

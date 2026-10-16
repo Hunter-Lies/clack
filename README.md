@@ -43,7 +43,7 @@ x86 与 x64 一并安装：32 位程序读取 `SysWOW64`，64 位程序读取 `S
 
 ## 使用
 
-1. 从 [Releases](https://github.com/Hunter-Lies/clack/releases) 下载 `Clack-1.0.0-x64.exe`
+1. 从 [Releases](https://github.com/Hunter-Lies/clack/releases) 下载 `Clack-1.1.0-x64.exe`
 2. 双击运行，在 UAC 提示中允许提权
 3. 点击安装，等待十项组件全部完成
 
@@ -53,9 +53,13 @@ x86 与 x64 一并安装：32 位程序读取 `SysWOW64`，64 位程序读取 `S
 
 | 位置 | 说明 |
 |---|---|
-| `C:\ProgramData\Click\payload\<版本>\` | 解出的运行库，约 60 MB，首次运行时解包 |
-| `%TEMP%\Click.log` | 运行日志；各组件安装日志在 `C:\ProgramData\Click\<组件>\install.log` |
+| `C:\ProgramData\Click\payload\<版本>\` | 解出的运行库，约 60 MB；只在运行期间存在，关窗口时删掉 |
+| `C:\ProgramData\Click\<组件>\` | 安装时临时拷过去的 MSI / CAB，退出时删掉，只留 `install.log` |
+| `%TEMP%\Click.log` | 运行日志，每次启动重写一份 |
 | `System32` / `SysWOW64` / `WinSxS` | 由微软安装器写入 |
+
+退出时会连临时安装包一起清掉，合计约 100 MB；各组件目录里的 `install.log` 留着备查
+——那是 msiexec 的日志。被任务管理器强杀时来不及清，重开一次再正常关掉即可。
 
 彻底清理：删除 exe 与 `C:\ProgramData\Click\`，已安装的运行库在「应用和功能」中卸载。
 
