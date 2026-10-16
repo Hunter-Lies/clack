@@ -34,4 +34,27 @@ mod tests {
         }
         assert_eq!(bad, 0, "{bad} 个组件的文件名和 payload 对不上");
     }
+
+    /// 1612 补救要靠"读出来的安装源路径"去把包放回原处。
+    /// 这个 API 在真机上返回的是纯路径（`C:\dir\`），注册表里存的是带类型索引的形式
+    /// （`n;4;C:\dir\`），UNC 和 http 都不能当本地目录去写。
+    #[test]
+    fn source_record_parsing() {
+        use crate::path_of_source_record;
+        use std::path::PathBuf;
+
+        let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let local = here.to_string_lossy().trim_end_matches('\\').to_string() + "\\";
+        // 纯路径（MsiSourceListGetInfo 就是这么给的）
+        assert_eq!(path_of_source_record(&local), Some(PathBuf::from(&local)));
+        // 带类型和索引（注册表里的形式）
+        assert_eq!(
+            path_of_source_record(&format!("n;4;{local}")),
+            Some(PathBuf::from(&local))
+        );
+        // 盘不存在的、UNC、http 一律不碰
+        assert_eq!(path_of_source_record("n;1;Q:\\nope\\"), None);
+        assert_eq!(path_of_source_record("n;1;\\\\server\\share\\"), None);
+        assert_eq!(path_of_source_record("http://example.com/x"), None);
+    }
 }

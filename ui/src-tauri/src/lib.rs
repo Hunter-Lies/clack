@@ -590,13 +590,27 @@ fn msiexec(pkg: &Path, verb: &str, props: &[&str], log_path: &Path) -> Result<i3
     Ok(st.code().unwrap_or(-1))
 }
 
-/// 我们手上这个包跟这台机器上已装的那一套撞了（1612：Windows 记着"已安装"，
-/// 但当初的安装源、连同 `C:\Windows\Installer` 里的缓存包都被清理工具扫掉了）。
+/// 1612：Windows 记着这套运行库"已经装过"，但缓存包（`C:\Windows\Installer\*.msi`）
+/// 和记录里的源目录都不在了。此后的重装是"修旧记录"——它按记录里的源找安装包，
+/// 不看我们命令行上给的这份，所以稳定失败。
 ///
-/// 只把目录加进安装源列表还不够：普通 `/i` 走的是"改已装的配置"这条路，它是去读
-/// 那个已经不存在的缓存包，不看我们命令行上给的包。所以要再用 `/f` 强制从包的
-/// 实际位置重新读一遍——`REINSTALLMODE=vomus` 覆盖全部文件、`REINSTALL=ALL`
-/// 覆盖全部组件，这两条合起来才会让 Windows Installer 用我们这份。
+/// 用户那台的现场日志把顺序写得很清楚：
+/// ```text
+/// Warning: Local cached package 'C:\Windows\Installer\10125216.msi' is missing.
+/// SOURCEMGMT: Attempting to use LastUsedSource from source list.
+/// SOURCEMGMT: Trying source d:\fa9f15c337616bda2f4885\.
+/// MSI (s): Source is invalid due to missing/inaccessible package.
+/// MSI (s): SOURCEMGMT: Failed to resolve source
+/// MSI (s): MainEngineThread is returning 1612
+/// ```
+/// 注意它**先**认 `LastUsedSource`（注册表 `…\Installer\Products\<键>\SourceList\LastUsedSource`，
+/// 形如 `n;4;C:\ProgramData\Click\vc2008_x86\`；本地目录是登记在 `Net` 列表里的，
+/// 不是 `Media`）。所以两条路，按命中率排：
+///
+/// 1. 把包放回记录里那个目录（它要的就是这个，不需要跟它讲道理）；
+/// 2. 退一步用官方 API 追加源、并把 `LastUsedSource` 改写指向我们的目录，再 `/f` 强装。
+///
+/// 每一步的返回码都写进日志：这件事只能靠现场日志判断成没成。
 fn msi_retry_with_source(c: &Comp, msi: &Path, stage: &Path, first_log: &Path, code: i32) -> Result<i32, String> {
     log(&format!(
         "msiexec 返回 {code}（旧的安装记录还在，但缓存包/安装源已经不在了）。日志：{}",
@@ -605,14 +619,44 @@ fn msi_retry_with_source(c: &Comp, msi: &Path, stage: &Path, first_log: &Path, c
     if c.pcode.is_empty() {
         return Ok(code);
     }
-    let src = format!("{}\\", stage.display());
-    if add_msi_source(c.pcode, &src) {
-        log(&format!("已把 {src} 补进这套运行库的安装源列表"));
-    } else {
-        log("往安装源列表里加这一条没成功（多半是没权限），还是照试");
+
+    let recorded = msi_last_used_source(c.pcode);
+    match &recorded {
+        Some(v) => log(&format!("这台机器记的安装源：{v}")),
+        None => log("读不出这台机器记的安装源"),
     }
-    // /f 的 pkg 位置参数就是"从哪儿读安装包"，这一步绕开了那个不存在的缓存包
-    let retry_log = stage.join("install-retry.log");
+
+    // 路 1：把包放回它记的那个目录
+    if let Some(dir) = recorded.as_deref().and_then(path_of_source_record) {
+        if stage.is_dir() {
+            match restore_source_dir(&dir, stage) {
+                Ok(()) => {
+                    log(&format!("已把安装包放回 {}", dir.display()));
+                    let rc = msiexec(msi, "/i", &[], &stage.join("install-retry.log"))?;
+                    if code_ok(Some(rc)) {
+                        log("把包放回原来那个源目录之后装上了");
+                        return Ok(rc);
+                    }
+                    log(&format!("把包放回去还是 {rc}，日志：{}", stage.join("install-retry.log").display()));
+                }
+                Err(e) => log(&format!("往 {} 里放安装包没成功：{e}", dir.display())),
+            }
+        }
+    }
+
+    // 路 2：追加源 + 改写 LastUsedSource，然后强制重装
+    let src = format!("{}\\", stage.display());
+    if !add_msi_source(c.pcode, &src) {
+        log("往安装源列表里加这一条没成功，还是照试");
+    }
+    msi_set_last_used_source(c.pcode, &src);
+    if let Some(now) = msi_last_used_source(c.pcode) {
+        log(&format!("改写之后记的安装源：{now}"));
+    }
+
+    // /f 的 pkg 位置参数就是"从哪儿读安装包"，这是最后能自己动手的一步；
+    // REINSTALLMODE=vomus 覆盖全部文件，REINSTALL=ALL 覆盖全部组件
+    let retry_log = stage.join("install-retry2.log");
     let retry_code = msiexec(
         msi,
         "/f",
@@ -630,6 +674,103 @@ fn msi_retry_with_source(c: &Comp, msi: &Path, stage: &Path, first_log: &Path, c
     Ok(retry_code)
 }
 
+/// 从来源记录 `n;4;C:\dir\` 里取出那个目录。不是本地盘路径（UNC、URL）就不碰。
+fn path_of_source_record(record: &str) -> Option<PathBuf> {
+    let path = record.rsplit(';').next()?.trim();
+    let bytes = path.as_bytes();
+    // 只认 `X:\...` 这种本地绝对路径，别的（`\\server\share`、http）留给别的办法
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
+        return None;
+    }
+    let drive = PathBuf::from(&path[..2]);
+    if !drive.is_dir() {
+        // 记录里的盘不在（U 盘拔了、分区删了），这条路走不通
+        return None;
+    }
+    Some(PathBuf::from(path))
+}
+
+/// 把 MSI / CAB / MSP 原样放到那个目录里——Windows 要的就是"记录里的源目录里有这个包"。
+fn restore_source_dir(dir: &Path, stage: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for e in std::fs::read_dir(stage)?.flatten() {
+        let p = e.path();
+        if p.is_file() && has_ext(&p, MSI_EXTS) {
+            std::fs::copy(&p, dir.join(e.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
+/// 这台机器为这个产品记着的"上次用的安装源"。
+fn msi_last_used_source(product: &str) -> Option<String> {
+    use windows_sys::Win32::System::ApplicationInstallationAndServicing::{
+        MsiSourceListGetInfoW, MSIINSTALLCONTEXT_MACHINE,
+    };
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let (product, prop) = (wide(product), wide("LastUsedSource"));
+    unsafe {
+        let mut need: u32 = 0;
+        // 先问长度（返回 ERROR_MORE_DATA，need 里是字符数）
+        MsiSourceListGetInfoW(
+            product.as_ptr(),
+            std::ptr::null(),
+            MSIINSTALLCONTEXT_MACHINE,
+            0,
+            prop.as_ptr(),
+            std::ptr::null_mut(),
+            &mut need,
+        );
+        if need == 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; need as usize + 1];
+        let mut len = buf.len() as u32;
+        let rc = MsiSourceListGetInfoW(
+            product.as_ptr(),
+            std::ptr::null(),
+            MSIINSTALLCONTEXT_MACHINE,
+            0,
+            prop.as_ptr(),
+            buf.as_mut_ptr(),
+            &mut len,
+        );
+        if rc != 0 {
+            return None;
+        }
+        let end = buf.iter().position(|c| *c == 0).unwrap_or(len as usize);
+        Some(String::from_utf16_lossy(&buf[..end]))
+    }
+}
+
+/// 把 `LastUsedSource` 改成我们的目录。
+/// 取值形式先按 `MsiSourceListGetInfo` 读出来那样给（就是一条纯路径），
+/// 不行再试注册表里那种带类型的写法。
+fn msi_set_last_used_source(product: &str, source_dir: &str) {
+    use windows_sys::Win32::System::ApplicationInstallationAndServicing::{
+        MsiSourceListSetInfoW, MSIINSTALLCONTEXT_MACHINE,
+    };
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let (product, prop) = (wide(product), wide("LastUsedSource"));
+    for (form, text) in [("纯路径", source_dir.to_string()), ("n;1; 带类型", format!("n;1;{source_dir}"))] {
+        let value = wide(&text);
+        let rc = unsafe {
+            MsiSourceListSetInfoW(
+                product.as_ptr(),
+                std::ptr::null(),
+                MSIINSTALLCONTEXT_MACHINE,
+                0,
+                prop.as_ptr(),
+                value.as_ptr(),
+            )
+        };
+        log(&format!("把 LastUsedSource 改写成 {source_dir}（{form}）：返回 {rc}"));
+        if rc == 0 {
+            return;
+        }
+    }
+}
+
 /// 把我们的目录补进这个产品的"安装源列表"（官方 API：MsiSourceListAddSourceEx）。
 ///
 /// 为什么需要它：Windows 对"已经装过"的 MSI 产品，重装时会先去记录的源目录找安装包，
@@ -637,26 +778,27 @@ fn msi_retry_with_source(c: &Comp, msi: &Path, stage: &Path, first_log: &Path, c
 /// U 盘、解压完就删的临时文件夹），就会一直回 1612；把我们的目录加进去，它才找得到。
 ///
 /// 上下文必须给对：vcredist 都是按"每台机器"装的，源列表按上下文分开存，机器上下文是 4，
-/// 当前用户那份是 2。两个都补一遍；返回码原样写进日志——返回码是排查这件事唯一的线索。
+/// 当前用户那份是 2（实测这类产品在 2 上直接回 1605"没这个产品"，所以只写机器那份）。
+/// 返回码原样写进日志——返回码是排查这件事唯一的线索。
 fn add_msi_source(product: &str, source_dir: &str) -> bool {
     use windows_sys::Win32::System::ApplicationInstallationAndServicing::{
-        MsiSourceListAddSourceExW, MSIINSTALLCONTEXT_MACHINE, MSIINSTALLCONTEXT_USERUNMANAGED,
+        MsiSourceListAddSourceExW, MSIINSTALLCONTEXT_MACHINE,
     };
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
     let (product, source) = (wide(product), wide(source_dir));
-    let mut ok = false;
-    for (ctx, who) in [
-        (MSIINSTALLCONTEXT_MACHINE, "机器"),
-        (MSIINSTALLCONTEXT_USERUNMANAGED, "当前用户"),
-    ] {
-        // dwOptions = 0：只往上加，不动已有的条目
-        let rc = unsafe {
-            MsiSourceListAddSourceExW(product.as_ptr(), std::ptr::null(), ctx, 0, source.as_ptr(), 0)
-        };
-        log(&format!("把 {source_dir} 加进{who}上下文的安装源列表：返回 {rc}"));
-        ok |= rc == 0;
-    }
-    ok
+    // dwOptions = 0：只往上加，不动已有的条目
+    let rc = unsafe {
+        MsiSourceListAddSourceExW(
+            product.as_ptr(),
+            std::ptr::null(),
+            MSIINSTALLCONTEXT_MACHINE,
+            0,
+            source.as_ptr(),
+            0,
+        )
+    };
+    log(&format!("把 {source_dir} 加进安装源列表：返回 {rc}"));
+    rc == 0
 }
 
 fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
