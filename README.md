@@ -43,7 +43,7 @@ x86 与 x64 一并安装：32 位程序读取 `SysWOW64`，64 位程序读取 `S
 
 ## 使用
 
-1. 从 [Releases](https://github.com/Hunter-Lies/clack/releases) 下载 `Clack-1.1.6-x64.exe`
+1. 从 [Releases](https://github.com/Hunter-Lies/clack/releases) 下载 `Clack-1.2.0-x64.exe`
 2. 双击运行，在 UAC 提示中允许提权
 3. 点击安装，等待十项组件全部完成
 

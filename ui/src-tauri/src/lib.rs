@@ -1098,6 +1098,42 @@ fn flag_reboot(code: i32) {
     }
 }
 
+/// 系统 UCRT / API Set 能不能用。
+///
+/// 注意判据不能是"文件在不在"：Win10/11 正常情况下**不需要**真有 `api-ms-win-*.dll`
+/// （由系统的 API Set 表解析），所以只能真的试着加载一次。
+/// 加载不了 = 这台机器的系统组件被精简或损坏了，装多少运行库都白搭，得走 sfc / DISM。
+#[cfg(windows)]
+fn ucrt_problem() -> Option<String> {
+    use windows_sys::Win32::Foundation::FreeLibrary;
+    use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+
+    let mut bad: Vec<&str> = Vec::new();
+    for name in [
+        "ucrtbase.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+    ] {
+        let w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let h = unsafe { LoadLibraryW(w.as_ptr()) };
+        if h.is_null() {
+            bad.push(name);
+        } else {
+            unsafe { FreeLibrary(h) };
+        }
+    }
+    if bad.is_empty() {
+        None
+    } else {
+        Some(bad.join("、"))
+    }
+}
+
+#[cfg(not(windows))]
+fn ucrt_problem() -> Option<String> {
+    None
+}
+
 fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
     let dir = root.join(c.dir);
     if !dir.is_dir() {
@@ -1115,18 +1151,31 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                     return Err(format!("payload 里缺 {}", from.display()));
                 }
                 let to = dest.join(f);
-                // 散装 dll 只补缺、只往新的走：
+                // 强校验（默认就做，不留开关）：散装 dll 我们手里那份永远是最终版
+                // （VB5/VB6 停在 1998-2004，CRT 70/71 停在 2003），所以直接按"内容对不对"判：
                 //   · 系统里没有 → 复制
-                //   · 有，但比我们这份旧、或读不出内容（0 字节 / 被截断） → 覆盖
-                //   · 版本相同或更新 → 不动（微软的安全更新、别的程序钉住的版本都留着）
+                //   · 版本比我们旧 → 覆盖
+                //   · 版本一样但大小不一样 = 文件被改坏了 → 覆盖   ← 这一步就是"强检测"
+                //   · 版本一样、大小一样 → 校验通过，不动
+                //   · 版本比我们新 → 不动（微软后的更新、别的程序钉住的版本留着）
                 // 正在被加载的 dll 直接覆盖会共享冲突，那就让占用它的进程先退出再试一次，
                 // 还不行就安排到下次重启时替换——用户那边顶多是"这次没生效"。
-                let same_or_newer = match (file_version(&from), file_version(&to)) {
-                    (Some(pv), Some(tv)) => tv >= pv,
-                    _ => false,
+                let want_size = std::fs::metadata(&from).map(|m| m.len()).unwrap_or(0);
+                let got_size = std::fs::metadata(&to).map(|m| m.len()).unwrap_or(0);
+                let verdict = match (file_version(&from), file_version(&to)) {
+                    (Some(pv), Some(tv)) if tv > pv => "更新",
+                    (Some(pv), Some(tv)) if tv == pv => {
+                        if want_size == got_size {
+                            "同版本同大小"
+                        } else {
+                            "同版本但内容不对"
+                        }
+                    }
+                    (Some(_), Some(_)) => "旧版",
+                    _ => "读不出内容",
                 };
-                if same_or_newer {
-                    log(&format!("{} 已是同版本或更新，不动", to.display()));
+                if verdict == "更新" || verdict == "同版本同大小" {
+                    log(&format!("{} 校验通过（{verdict}）", to.display()));
                     continue;
                 }
                 let existed = to.is_file();
@@ -1134,14 +1183,13 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                     return Err(e);
                 }
                 if existed {
-                    log(&format!("{} 是旧的/坏的，已覆盖", to.display()));
+                    log(&format!("{} {verdict}，已按强检测覆盖", to.display()));
                 }
                 // 核一下大小，别把"半截文件"当成装好了（杀毒软件拦下来的常见表现）
-                let want = std::fs::metadata(&from).map(|m| m.len()).unwrap_or(0);
                 let got = std::fs::metadata(&to).map(|m| m.len()).unwrap_or(0);
-                if want != got {
+                if want_size != got {
                     return Err(format!(
-                        "{} 复制后大小不对（{got} != {want}），可能被杀毒软件拦了",
+                        "{} 复制后大小不对（{got} != {want_size}），可能被杀毒软件拦了",
                         to.display()
                     ));
                 }
@@ -1258,6 +1306,28 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                     flag_reboot(code);
                 }
             }
+            // 强检测修复（默认就做）：装完再让安装器自己把每个文件过一遍——
+            // 版本、语言、大小，必要时按包里的哈希重写。这一步专治"文件坏了或被顶替，
+            // 但安装器认为已经装好所以跳过"的情况，连 SxS 装配件和 policy 文件一起修，
+            // 比自己往系统目录里拷 dll 干净得多。
+            if code == 0 {
+                let verify_log = stage.join("install-verify.log");
+                let vc = msiexec(
+                    msi.as_os_str(),
+                    "/f",
+                    &["REINSTALL=ALL", "REINSTALLMODE=vomus", "USING_EXUIH_SILENT=1"],
+                    &verify_log,
+                )?;
+                if code_ok(Some(vc)) {
+                    log(&format!("{} 强校验修复完成（返回 {vc}）", c.id));
+                } else {
+                    log(&format!(
+                        "{} 强校验修复返回 {vc}，日志：{}",
+                        c.id,
+                        verify_log.display()
+                    ));
+                }
+            }
             // 同目录里如果有 .msp 补丁就接着打上（2010 SP1 的 KB2565063 就是这样进来的）。
             // 只在基础包真装上了（code == 0）才打：1638 说明这次什么都没动，
             // 往上打补丁没有意义；而补丁本身回 1638 / 1642 只说明"已经打过 / 被更高版本
@@ -1336,6 +1406,20 @@ fn run_one(root: &Path, c: &Comp) -> Result<(), String> {
                 }
                 if matches!(code, 3010 | 1641) {
                     flag_reboot(code);
+                }
+                // 强检测修复（默认就做）：自解压包支持 /repair，让它把自己那份里的
+                // 每个 MSI 和文件都校验一遍，坏了的重写回来。
+                let mut repair: Vec<&str> = c.args.to_vec();
+                if let Some(first) = repair.first_mut() {
+                    *first = "/repair";
+                }
+                if let Ok(st) = Command::new(&file).args(&repair).status() {
+                    let raw = st.code().unwrap_or(-1);
+                    let rc = if (raw as u32) >= 0x8007_0000 { raw & 0xFFFF } else { raw };
+                    log(&format!("{} 强校验修复（/repair）返回 {rc}", c.id));
+                    if matches!(rc, 3010 | 1641) {
+                        flag_reboot(rc);
+                    }
                 }
                 Ok(())
             } else {
@@ -1442,6 +1526,14 @@ fn run_install_inner(app: &AppHandle, rows: Vec<String>) {
         }
     }
 
+    // 系统组件体检（默认就做）：UCRT / API Set 解析不了的话，装多少运行库都没用，
+    // 得在界面上明说，别让用户以为工具修好了。
+    if let Some(names) = ucrt_problem() {
+        log(&format!("系统 UCRT/API Set 加载失败：{names}"));
+        failed.push(format!(
+            "系统组件损坏：{names} 加载不了。请用管理员命令行运行 sfc /scannow 和 DISM /Online /Cleanup-Image /RestoreHealth"
+        ));
+    }
     let _ = app.emit(
         "install:done",
         Done {
